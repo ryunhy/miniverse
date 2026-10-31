@@ -1,41 +1,42 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
+# 依赖与构建
+node_modules/
+.next/
+out/
+dist/
+coverage/
 *.tsbuildinfo
 next-env.d.ts
+
+# 环境变量与密钥（严禁提交）
+.env
+.env.*
+!.env.example
+*.pem
+.vercel/
+
+# 用户数据（上传照片 / 任务 / 场景 / 重建产物）
+data/uploads/*
+data/processed/*
+data/reconstructions/*
+data/tasks/*
+data/scenes/*
+# 公开数据集（mipnerf360 zip + 解压照片，实测 2.67GB，超 GitHub 单文件 100MB 上限）
+data/datasets/
+# 演示高斯副本：由 tools/generate-demo-splat.mjs 生成，正式文件在 apps/web/public/demo/
+data/demo/*
+!data/*/.gitkeep
+
+# 改动前快照（入库后 git 自身即备份，避免噪音）
+.backup-*/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
