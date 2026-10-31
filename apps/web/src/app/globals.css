@@ -1,0 +1,356 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────
+   MiniVerse Design Tokens — 渐变科幻风
+───────────────────────────────────────────────────────── */
+:root {
+  --background: #030712;
+  --foreground: #f1f5f9;
+
+  /* 科幻渐变 */
+  --grad-logo: linear-gradient(135deg, #a855f7 0%, #ec4899 40%, #f59e0b 100%);
+  --grad-panel: linear-gradient(180deg, #0a0f1e 0%, #030712 100%);
+  --grad-accent: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+  --grad-cyan: linear-gradient(135deg, #06b6d4 0%, #22d3ee 100%);
+
+  /* 玻璃拟态 */
+  --glass-bg: rgba(10, 15, 30, 0.88);
+  --glass-border: rgba(139, 92, 246, 0.18);
+  --glass-border-hover: rgba(168, 85, 247, 0.4);
+
+  /* 发光效果 */
+  --glow-purple: 0 0 20px rgba(168, 85, 247, 0.35), 0 0 40px rgba(168, 85, 247, 0.1);
+  --glow-purple-sm: 0 0 10px rgba(168, 85, 247, 0.5);
+  --glow-cyan: 0 0 15px rgba(34, 211, 238, 0.35);
+  --glow-gold: 0 0 15px rgba(245, 158, 11, 0.3);
+  --glow-green: 0 0 10px rgba(52, 211, 153, 0.4);
+  --glow-red: 0 0 10px rgba(248, 113, 113, 0.4);
+
+  /* 面板 */
+  --panel-bg: #080d1a;
+  --panel-border: rgba(139, 92, 246, 0.12);
+  --topbar-height: 44px;
+  --statusbar-height: 26px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* ─────────────────────────────────────────────────────────
+   全局基础
+───────────────────────────────────────────────────────── */
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans, Arial, Helvetica, sans-serif);
+  overflow-x: hidden;
+}
+
+/* 数字输入框取消箭头 */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.25);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(168, 85, 247, 0.45);
+}
+
+/* ─────────────────────────────────────────────────────────
+   玻璃拟态工具类
+───────────────────────────────────────────────────────── */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+}
+
+.glass-panel {
+  background: rgba(8, 13, 26, 0.92);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-right: 1px solid var(--panel-border);
+}
+
+/* ─────────────────────────────────────────────────────────
+   Logo 渐变文字
+───────────────────────────────────────────────────────── */
+.logo-gradient {
+  background: var(--grad-logo);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.6));
+}
+
+/* ─────────────────────────────────────────────────────────
+   按钮工具类
+───────────────────────────────────────────────────────── */
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  transition: all 0.15s ease;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-ghost:hover {
+  color: #f1f5f9;
+  background: rgba(30, 41, 59, 0.8);
+  border-color: rgba(139, 92, 246, 0.3);
+}
+.btn-ghost:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-accent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.25);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-accent:hover {
+  background: linear-gradient(135deg, #6d28d9 0%, #9333ea 100%);
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.45);
+}
+.btn-accent:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-gold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #030712;
+  background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.25);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-gold:hover {
+  background: linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+  box-shadow: 0 0 18px rgba(245, 158, 11, 0.45);
+}
+.btn-gold:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #fca5a5;
+  background: rgba(127, 29, 29, 0.3);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-danger:hover {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.5);
+  box-shadow: var(--glow-red);
+}
+
+/* ─────────────────────────────────────────────────────────
+   状态徽章
+───────────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.badge-pending  { background: rgba(51,65,85,0.6);   color: #94a3b8; border: 1px solid rgba(71,85,105,0.4); }
+.badge-processing { background: rgba(30,64,175,0.3); color: #93c5fd; border: 1px solid rgba(99,102,241,0.4); box-shadow: 0 0 8px rgba(99,102,241,0.2); }
+.badge-completed  { background: rgba(6,78,59,0.35);  color: #6ee7b7; border: 1px solid rgba(52,211,153,0.3); box-shadow: 0 0 8px rgba(52,211,153,0.15); }
+.badge-failed     { background: rgba(127,29,29,0.35); color: #fca5a5; border: 1px solid rgba(248,113,113,0.3); box-shadow: 0 0 8px rgba(248,113,113,0.15); }
+.badge-canceled   { background: rgba(30,41,59,0.4);   color: #475569; border: 1px solid rgba(51,65,85,0.3); }
+
+/* ─────────────────────────────────────────────────────────
+   动画关键帧
+───────────────────────────────────────────────────────── */
+@keyframes mv-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes mv-slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes mv-glow-pulse {
+  0%, 100% { filter: drop-shadow(0 0 8px rgba(168, 85, 247, 0.5)); }
+  50%       { filter: drop-shadow(0 0 20px rgba(168, 85, 247, 0.9)); }
+}
+@keyframes mv-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes mv-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes mv-star-twinkle {
+  0%, 100% { opacity: 0.2; }
+  50%       { opacity: 0.8; }
+}
+@keyframes mv-dot-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+@keyframes mv-scan-line {
+  from { transform: translateY(-100%); }
+  to   { transform: translateY(200%); }
+}
+@keyframes mv-progress-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ─────────────────────────────────────────────────────────
+   骨架屏
+───────────────────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(139,92,246,0.06) 0%,
+    rgba(139,92,246,0.15) 50%,
+    rgba(139,92,246,0.06) 100%
+  );
+  background-size: 200% 100%;
+  animation: mv-shimmer 1.6s infinite;
+  border-radius: 6px;
+}
+
+/* ─────────────────────────────────────────────────────────
+   Toast 通知
+───────────────────────────────────────────────────────── */
+.mv-toast {
+  animation: mv-slide-up 0.25s ease;
+  background: rgba(10, 15, 30, 0.95);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  box-shadow: 0 0 30px rgba(168, 85, 247, 0.15), 0 8px 32px rgba(0,0,0,0.5);
+}
+
+/* ─────────────────────────────────────────────────────────
+   发光进度条
+───────────────────────────────────────────────────────── */
+.progress-glow {
+  background: linear-gradient(90deg, #6366f1, #a855f7, #ec4899, #a855f7, #6366f1);
+  background-size: 200% 100%;
+  animation: mv-progress-shimmer 1.8s linear infinite;
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
+}
+
+/* ─────────────────────────────────────────────────────────
+   面板淡入
+───────────────────────────────────────────────────────── */
+.mv-fade-in {
+  animation: mv-fade-in 0.3s ease;
+}
+
+/* ─────────────────────────────────────────────────────────
+   星空背景（首页）
+───────────────────────────────────────────────────────── */
+.stars-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+.stars-bg::before,
+.stars-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.stars-bg::before {
+  background-image:
+    radial-gradient(1px 1px at 10% 15%, rgba(255,255,255,0.6) 0%, transparent 100%),
+    radial-gradient(1px 1px at 25% 40%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(1px 1px at 40% 5%,  rgba(255,255,255,0.7) 0%, transparent 100%),
+    radial-gradient(1px 1px at 55% 75%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(1px 1px at 70% 20%, rgba(255,255,255,0.6) 0%, transparent 100%),
+    radial-gradient(1px 1px at 80% 55%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(1px 1px at 90% 90%, rgba(255,255,255,0.3) 0%, transparent 100%),
+    radial-gradient(1px 1px at 15% 80%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(1px 1px at 35% 60%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(1px 1px at 60% 45%, rgba(255,255,255,0.6) 0%, transparent 100%),
+    radial-gradient(2px 2px at 5%  30%, rgba(168,85,247,0.5) 0%, transparent 100%),
+    radial-gradient(2px 2px at 50% 10%, rgba(168,85,247,0.4) 0%, transparent 100%),
+    radial-gradient(2px 2px at 85% 70%, rgba(99,102,241,0.5) 0%, transparent 100%);
+  animation: mv-star-twinkle 3s ease-in-out infinite;
+}
+.stars-bg::after {
+  background-image:
+    radial-gradient(1px 1px at 20% 25%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(1px 1px at 45% 85%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(1px 1px at 65% 35%, rgba(255,255,255,0.6) 0%, transparent 100%),
+    radial-gradient(1px 1px at 75% 65%, rgba(255,255,255,0.3) 0%, transparent 100%),
+    radial-gradient(1px 1px at 95% 15%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(2px 2px at 30% 70%, rgba(245,158,11,0.4) 0%, transparent 100%),
+    radial-gradient(2px 2px at 70% 50%, rgba(34,211,238,0.35) 0%, transparent 100%);
+  animation: mv-star-twinkle 4.5s ease-in-out infinite 1.5s;
+}
+
+/* nebula 光晕 */
+.nebula-glow {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+}

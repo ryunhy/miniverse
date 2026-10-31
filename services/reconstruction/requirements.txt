@@ -1,0 +1,16 @@
+# MiniVerse 重建服务依赖
+# 注意：Nerfstudio 对 PyTorch/CUDA 版本敏感，以下仅为基础声明；
+# 实际安装顺序与版本以官方文档为准：https://docs.nerf.studio/quickstart/installation.html
+#
+# 推荐流程（WSL2 Ubuntu）：
+#   1) conda create -n miniverse python=3.10
+#   2) pip install torch==2.1.* torchvision --index-url https://download.pytorch.org/whl/cu121
+#   3) conda install -c nvidia cuda-toolkit   # 编译 gsplat 需要
+#   4) pip install nerfstudio                 # 会带 gsplat/tiny-cuda-nn
+#   5) sudo apt install colmap
+
+nerfstudio>=1.0,<2
+torch>=2.0
+torchvision
+Pillow>=10
+numpy
