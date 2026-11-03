@@ -25,6 +25,16 @@ describe("自动保存决策（读失败退化为只读时禁止回写）", () =
     expect(decideAutosave({ ready: true, hasScene: true, loadSource: "server", dirty: false })).toBe("skip-unchanged");
     expect(decideAutosave({ ready: true, hasScene: true, loadSource: "unknown", dirty: false })).toBe("skip-unchanged");
   });
+
+  it("挂起（409 弹窗未决 / 取消后暂停）时即使有改动也不写", () => {
+    expect(
+      decideAutosave({ ready: true, hasScene: true, loadSource: "server", dirty: true, suspended: true })
+    ).toBe("skip-suspended");
+    // 挂起优先于只读 / 无改动判定，避免状态组合产生歧义
+    expect(
+      decideAutosave({ ready: true, hasScene: true, loadSource: "local", dirty: false, suspended: true })
+    ).toBe("skip-suspended");
+  });
 });
 
 describe("场景快照（dirty 比对）", () => {

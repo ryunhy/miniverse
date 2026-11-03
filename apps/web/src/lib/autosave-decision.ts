@@ -16,7 +16,12 @@
 
 export type LoadSource = "server" | "local" | "unknown";
 
-export type AutosaveDecision = "write" | "skip-not-ready" | "skip-readonly-local" | "skip-unchanged";
+export type AutosaveDecision =
+  | "write"
+  | "skip-not-ready"
+  | "skip-suspended"
+  | "skip-readonly-local"
+  | "skip-unchanged";
 
 export function decideAutosave(params: {
   ready: boolean;
@@ -24,8 +29,14 @@ export function decideAutosave(params: {
   loadSource: LoadSource;
   /** 场景内容是否相对基线快照发生了变化 */
   dirty: boolean;
+  /**
+   * 自动保存是否被挂起：409 冲突弹窗未决、或用户选择「取消」后主动暂停。
+   * 挂起期间仍允许编辑，只是不写服务端，避免弹窗基准反复漂移或重复弹窗。
+   */
+  suspended?: boolean;
 }): AutosaveDecision {
   if (!params.ready || !params.hasScene) return "skip-not-ready";
+  if (params.suspended) return "skip-suspended";
   if (params.loadSource === "local") return "skip-readonly-local";
   if (!params.dirty) return "skip-unchanged";
   return "write";

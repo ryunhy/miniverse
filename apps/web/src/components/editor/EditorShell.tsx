@@ -43,10 +43,10 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   /** 读失败类型：unavailable=5xx/网络，missing=404（仅用于文案与提示，不参与自动保存判定） */
   const [loadFailure, setLoadFailure] = useState<"unavailable" | "missing" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  /** 保存遇到 409：必须由用户三选一，绝不静默失败 */
-  const [conflict, setConflict] = useState<{ local: SceneData; server: SceneData | null; serverRevision: number } | null>(
-    null
-  );
+  /** 保存遇到 409：必须由用户三选一，绝不静默失败。基准 serverRevision 只在首次冲突时固定 */
+  const [conflict, setConflict] = useState<{ server: SceneData | null; serverRevision: number } | null>(null);
+  /** 用户取消冲突后暂停自动保存：避免「取消 → 立刻又自动重试 → 又弹窗」的死循环 */
+  const [autosaveHold, setAutosaveHold] = useState(false);
   const [health, setHealth] = useState<{ python: string | null; workerBusy: boolean; taskCount: number } | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -131,13 +131,14 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           expectedRevision !== undefined ? { expectedRevision } : undefined
         );
         markSaved("server", res.revision);
+        setAutosaveHold(false);
         return "ok";
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
           const payload = e.payload as { revision?: number; scene?: SceneData } | undefined;
           const serverScene = payload?.scene ?? null;
+          // 只记录基准 revision + 服务端内容；不缓存本地快照，避免弹窗期间编辑让基准漂移
           setConflict({
-            local: target,
             server: serverScene,
             serverRevision: payload?.revision ?? serverScene?.metadata.revision ?? 0,
           });
@@ -152,12 +153,14 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
   // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据；
   // 内容与服务端一致（dirty=false）也跳过，避免加载后盲写覆盖这半秒内别处的改动。
+  // 冲突弹窗未决或用户取消后挂起时同样跳过：编辑器仍可继续改，只是不写、不再弹第二个窗。
   useEffect(() => {
     const decision = decideAutosave({
       ready,
       hasScene: scene !== null,
       loadSource,
       dirty: sceneDirty,
+      suspended: conflict !== null || autosaveHold,
     });
     if (decision !== "write" || !scene) return;
     const t = setTimeout(async () => {
@@ -165,7 +168,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
       await saveToServer(scene);
     }, 800);
     return () => clearTimeout(t);
-  }, [scene, sceneDirty, ready, sceneId, loadSource, mirrorToLocal, saveToServer]);
+  }, [scene, sceneDirty, ready, sceneId, loadSource, mirrorToLocal, saveToServer, conflict, autosaveHold]);
 
   // 本地副本回写服务端：仅由用户点击 + 二次确认触发
   const handleOverwriteServer = useCallback(async () => {
@@ -191,10 +194,12 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     flash("已载入服务端最新版本，本地改动已丢弃");
   }, [conflict, setScene, sceneId, mirrorToLocal, flash]);
 
-  // 409 冲突三选项：用我的内容强制覆盖服务端（以冲突对话框里的最新 revision 为基线）
+  // 409 冲突三选项：用当前最新内容强制覆盖服务端（基准 revision 固定为首次冲突时的服务端版本）
   const resolveConflictUseMine = useCallback(async () => {
     if (!conflict) return;
-    const result = await saveToServer(conflict.local, conflict.serverRevision);
+    const latest = useEditorStore.getState().scene;
+    if (!latest) return;
+    const result = await saveToServer(latest, conflict.serverRevision);
     if (result === "ok") {
       setConflict(null);
       setLoadFailure(null);
@@ -202,13 +207,14 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     } else if (result === "failed") {
       flash("覆盖失败：服务端不可用，本地内容已保留");
     }
-    // result=conflict：saveToServer 已更新冲突对话框为最新服务端版本，保持弹窗
+    // result=conflict：服务端在此期间又变了，saveToServer 会更新基准并保持弹窗
   }, [conflict, saveToServer, flash]);
 
-  // 409 冲突三选项：取消——不写服务端，保留本地内容
+  // 409 冲突三选项：取消——不写服务端，保留本地内容，并暂停自动保存（可手动重试）
   const resolveConflictCancel = useCallback(() => {
     setConflict(null);
-    flash("已取消：未写入服务端，本地内容已保留");
+    setAutosaveHold(true);
+    flash("已取消写入：本地改动仍保留，自动保存已暂停（点「保存」可重试）");
   }, [flash]);
 
   // 快捷键
@@ -487,8 +493,14 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
           <button
             className="btn-ghost"
-            disabled={loadSource === "local"}
-            title={loadSource === "local" ? "只读模式：请用本地副本覆盖服务端" : "保存到服务端"}
+            disabled={loadSource === "local" || conflict !== null}
+            title={
+              conflict
+                ? "请先处理右下角的保存冲突"
+                : loadSource === "local"
+                  ? "只读模式：请用本地副本覆盖服务端"
+                  : "保存到服务端"
+            }
             onClick={async () => {
               if (!scene) return;
               mirrorToLocal();
@@ -769,7 +781,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           ) : (
             <>
               <span className="h-1.5 w-1.5 rounded-full bg-slate-700" />
-              <span>待保存</span>
+              <span>{autosaveHold ? "待保存（已暂停自动保存）" : "待保存"}</span>
             </>
           )}
           {savedAt && (
@@ -817,37 +829,36 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
         </span>
       </footer>
 
-      {/* 409 版本冲突：三选项，绝不静默失败 */}
+      {/* 409 版本冲突：非模态浮层，三选项，绝不静默失败；处理前仍可继续编辑（自动保存已暂停） */}
       {conflict && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-lg rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-2xl">
-            <div className="mb-2 text-sm font-semibold" style={{ color: "#fbbf24" }}>
-              保存冲突：服务端已被其他会话修改
-            </div>
-            <div className="mb-4 text-xs leading-relaxed text-slate-400">
-              本地记录的版本号与服务端当前版本（revision {conflict.serverRevision}）不一致，
-              为避免覆盖别人的改动，<span style={{ color: "#f87171" }}>本次未写入服务端</span>。请选择处理方式：
-            </div>
-            <div className="flex flex-col gap-2">
-              <button
-                className="rounded border border-sky-500/40 px-3 py-2 text-left text-xs text-sky-300 transition hover:bg-sky-500/10"
-                onClick={resolveConflictUseServer}
-              >
-                用服务端版本覆盖本地（丢弃我的改动）
-              </button>
-              <button
-                className="rounded border border-amber-500/40 px-3 py-2 text-left text-xs text-amber-300 transition hover:bg-amber-500/10"
-                onClick={resolveConflictUseMine}
-              >
-                用我的内容覆盖服务端（以服务端最新版本号为基线强制写入）
-              </button>
-              <button
-                className="rounded border border-slate-600 px-3 py-2 text-left text-xs text-slate-400 transition hover:bg-slate-700/30"
-                onClick={resolveConflictCancel}
-              >
-                取消（不写服务端，保留本地内容）
-              </button>
-            </div>
+        <div className="fixed bottom-4 right-4 z-50 w-[24rem] rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-2xl">
+          <div className="mb-2 text-sm font-semibold" style={{ color: "#fbbf24" }}>
+            保存冲突：服务端已被其他会话修改
+          </div>
+          <div className="mb-4 text-xs leading-relaxed text-slate-400">
+            本地记录的版本号与服务端当前版本（revision {conflict.serverRevision}）不一致，
+            为避免覆盖别人的改动，<span style={{ color: "#f87171" }}>本次未写入服务端</span>。
+            处理前仍可继续编辑，自动保存已暂停。请选择处理方式：
+          </div>
+          <div className="flex flex-col gap-2">
+            <button
+              className="rounded border border-sky-500/40 px-3 py-2 text-left text-xs text-sky-300 transition hover:bg-sky-500/10"
+              onClick={resolveConflictUseServer}
+            >
+              用服务端版本覆盖本地（丢弃我的改动）
+            </button>
+            <button
+              className="rounded border border-amber-500/40 px-3 py-2 text-left text-xs text-amber-300 transition hover:bg-amber-500/10"
+              onClick={resolveConflictUseMine}
+            >
+              用我的内容覆盖服务端（写入当前最新内容，以服务端最新版本号为基线）
+            </button>
+            <button
+              className="rounded border border-slate-600 px-3 py-2 text-left text-xs text-slate-400 transition hover:bg-slate-700/30"
+              onClick={resolveConflictCancel}
+            >
+              取消（不写服务端，保留本地内容并暂停自动保存）
+            </button>
           </div>
         </div>
       )}
