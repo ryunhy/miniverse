@@ -30,7 +30,7 @@ import LeftPanel from "./LeftPanel";
 import PropertiesPanel from "./PropertiesPanel";
 import { useEditorStore, type ViewPreset } from "@/stores/editor-store";
 import { api, ApiError } from "@/lib/api";
-import { decideAutosave } from "@/lib/autosave-decision";
+import { decideAutosave, snapshotScene } from "@/lib/autosave-decision";
 
 interface EditorShellProps {
   sceneId: string;
@@ -56,6 +56,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   const savedAt = useEditorStore((s) => s.savedAt);
   const storageMode = useEditorStore((s) => s.storageMode);
   const loadSource = useEditorStore((s) => s.loadSource);
+  const savedBaseline = useEditorStore((s) => s.savedBaseline);
   const splatLoad = useEditorStore((s) => s.splatLoad);
   const splatProgress = useEditorStore((s) => s.splatProgress);
   const viewMode = useEditorStore((s) => s.viewMode);
@@ -108,21 +109,31 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     };
   }, [sceneId, setScene, restoreFromLocal, flash]);
 
-  // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据
+  // 内容是否相对已持久化基线有变化：用序列化比对，避免 dirty 标记漏置位
+  const sceneDirty = scene !== null && savedBaseline !== null && snapshotScene(scene) !== savedBaseline;
+
+  // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据；
+  // 内容与服务端一致（dirty=false）也跳过，避免加载后盲写覆盖这半秒内别处的改动。
   useEffect(() => {
-    const decision = decideAutosave({ ready, hasScene: scene !== null, loadSource });
+    const decision = decideAutosave({
+      ready,
+      hasScene: scene !== null,
+      loadSource,
+      dirty: sceneDirty,
+    });
     if (decision !== "write" || !scene) return;
     const t = setTimeout(async () => {
       mirrorToLocal();
+      const sent = snapshotScene(scene);
       try {
         await api.saveScene(scene);
-        markSaved("server");
+        markSaved("server", sent);
       } catch {
         markSaved("local");
       }
     }, 800);
     return () => clearTimeout(t);
-  }, [scene, ready, sceneId, loadSource, mirrorToLocal, markSaved]);
+  }, [scene, sceneDirty, ready, sceneId, loadSource, mirrorToLocal, markSaved]);
 
   // 本地副本回写服务端：仅由用户点击 + 二次确认触发
   const handleOverwriteServer = useCallback(async () => {
@@ -131,7 +142,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     if (!window.confirm("确定用本地副本覆盖服务端场景？服务端当前内容会被丢弃，且无法撤销。")) return;
     try {
       await api.saveScene(current);
-      markSaved("server");
+      markSaved("server", snapshotScene(current));
       setLoadFailure(null);
       flash("已用本地副本覆盖服务端");
     } catch {
@@ -423,7 +434,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
               mirrorToLocal();
               try {
                 await api.saveScene(scene);
-                markSaved("server");
+                markSaved("server", snapshotScene(scene));
                 flash("已保存到服务端");
               } catch {
                 markSaved("local");
@@ -682,7 +693,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
               <HardDrive size={10} style={{ color: "#fbbf24" }} />
               <span style={{ color: "#fbbf24" }}>本地副本（只读）</span>
             </>
-          ) : storageMode === "server" ? (
+          ) : storageMode === "server" || (ready && loadSource === "server" && !sceneDirty) ? (
             <>
               <span
                 className="h-1.5 w-1.5 rounded-full"

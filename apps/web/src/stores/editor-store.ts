@@ -13,7 +13,7 @@ import {
   type SceneObject,
 } from "@shared/scene-schema";
 import { getAsset } from "@shared/asset-catalog";
-import type { LoadSource } from "@/lib/autosave-decision";
+import { snapshotScene, type LoadSource } from "@/lib/autosave-decision";
 
 const LOCAL_PREFIX = "miniverse:scene:v2:";
 
@@ -55,6 +55,8 @@ interface EditorState {
   storageMode: "server" | "local" | "unknown";
   /** 当前场景数据来源：server=服务端读取，local=读失败后回退的本地旧副本（只读，禁止自动回写） */
   loadSource: LoadSource;
+  /** 已持久化内容的基线快照（序列化串）；自动保存仅在内容≠基线时触发 */
+  savedBaseline: string | null;
 
   setSplatLoad: (s: SplatLoadState) => void;
   setSplatProgress: (p: SplatProgress | null) => void;
@@ -81,7 +83,7 @@ interface EditorState {
   pushHistory: () => void;
   undo: () => void;
   redo: () => void;
-  markSaved: (mode: "server" | "local") => void;
+  markSaved: (mode: "server" | "local", baseline?: string) => void;
   mirrorToLocal: () => void;
   restoreFromLocal: (sceneId: string) => boolean;
 }
@@ -115,6 +117,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   savedAt: null,
   storageMode: "unknown",
   loadSource: "unknown",
+  savedBaseline: null,
 
   setSplatLoad: (splatLoad) => set({ splatLoad }),
   setSplatProgress: (splatProgress) => set({ splatProgress }),
@@ -123,7 +126,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setViewMode: (viewMode) => set({ viewMode }),
 
   setScene: (scene, sceneId) =>
-    set({ scene, sceneId, past: [], future: [], selectedId: null, loadSource: "server" }),
+    set({
+      scene,
+      sceneId,
+      past: [],
+      future: [],
+      selectedId: null,
+      loadSource: "server",
+      // 加载成功即把服务端内容记为基线，内容未变时不再盲写
+      savedBaseline: snapshotScene(scene),
+    }),
 
   select: (id) => set({ selectedId: id }),
   setGizmoMode: (gizmoMode) => set({ gizmoMode }),
@@ -327,10 +339,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   // 成功写回服务端后，数据来源即视为服务端（用户确认覆盖本地副本后自动保存恢复）
-  markSaved: (storageMode) =>
+  markSaved: (storageMode, baseline) =>
     set({
       savedAt: Date.now(),
       storageMode,
+      ...(baseline !== undefined ? { savedBaseline: baseline } : {}),
       ...(storageMode === "server" ? { loadSource: "server" as LoadSource } : {}),
     }),
 
@@ -350,7 +363,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!raw) return false;
       const parsed = safeParseScene(JSON.parse(raw));
       if (!parsed.success) return false;
-      set({ scene: parsed.data, sceneId, past: [], future: [], selectedId: null, loadSource: "local" });
+      set({ scene: parsed.data, sceneId, past: [], future: [], selectedId: null, loadSource: "local", savedBaseline: null });
       return true;
     } catch {
       return false;
