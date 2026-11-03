@@ -256,14 +256,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   loadSceneJson: (raw) => {
+    const keepRevision = (nextSceneId: string) => {
+      const state = get();
+      return state.sceneId === nextSceneId ? state.scene?.metadata.revision : undefined;
+    };
     const v2 = safeParseScene(raw);
     if (v2.success) {
-      set({ scene: v2.data, sceneId: v2.data.sceneId, past: [], future: [], selectedId: null });
+      const revision = keepRevision(v2.data.sceneId);
+      const next = revision !== undefined
+        ? { ...v2.data, metadata: { ...v2.data.metadata, revision } }
+        : v2.data;
+      set({ scene: next, sceneId: next.sceneId, past: [], future: [], selectedId: null });
       return { ok: true };
     }
     const migrated = migrateV1Scene(raw);
     if (migrated) {
-      set({ scene: migrated, sceneId: migrated.sceneId, past: [], future: [], selectedId: null });
+      const revision = keepRevision(migrated.sceneId);
+      const next = revision !== undefined
+        ? { ...migrated, metadata: { ...migrated.metadata, revision } }
+        : migrated;
+      set({ scene: next, sceneId: next.sceneId, past: [], future: [], selectedId: null });
       return { ok: true };
     }
     const firstIssue = v2.error.issues[0];
@@ -281,7 +293,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({
       past: [...get().past, scene].slice(-HISTORY_LIMIT),
       future: [],
-      scene: parseScene({ ...demo, sceneId }),
+      // 重置只替换内容，不动服务端身份：沿用当前 revision，否则下一次保存必然 409
+      scene: parseScene({ ...demo, sceneId, metadata: { ...demo.metadata, revision: scene.metadata.revision } }),
       selectedId: null,
     });
   },
