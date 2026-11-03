@@ -31,10 +31,44 @@ export interface TaskEvent {
   created_at: string;
 }
 
+/** 带 HTTP 状态码的请求错误：调用方据此区分 404（场景不存在）与 5xx/网络（服务端暂不可用） */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((body as { error?: string }).error || `请求失败（${res.status}）`);
+  if (!res.ok) throw new ApiError((body as { error?: string }).error || `请求失败（${res.status}）`, res.status);
   return body as T;
+}
+
+/** 只有 5xx 与网络错误值得重试；4xx（含 404）重试无意义 */
+function isRetryableReadError(e: unknown): boolean {
+  if (e instanceof ApiError) return e.status >= 500;
+  return true;
+}
+
+/** 有限次退避重试（2 次，300ms/900ms），避免服务端瞬时 5xx 直接退化成读失败 */
+const READ_RETRY_DELAYS_MS = [300, 900];
+
+async function getSceneWithRetry(id: string): Promise<{ scene: SceneData }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= READ_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await fetch(`/api/scenes/${id}`).then((r) => json<{ scene: SceneData }>(r));
+    } catch (e) {
+      lastError = e;
+      if (!isRetryableReadError(e) || attempt === READ_RETRY_DELAYS_MS.length) break;
+      await new Promise((resolve) => setTimeout(resolve, READ_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("网络请求失败");
 }
 
 export const api = {
@@ -45,7 +79,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ template, name }),
     }).then((r) => json<{ scene: SceneData }>(r)),
-  getScene: (id: string) => fetch(`/api/scenes/${id}`).then((r) => json<{ scene: SceneData }>(r)),
+  getScene: (id: string) => getSceneWithRetry(id),
   createSceneFromReconstruction: (taskId: string) =>
     fetch("/api/scenes/from-reconstruction", {
       method: "POST",

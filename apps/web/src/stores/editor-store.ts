@@ -13,6 +13,7 @@ import {
   type SceneObject,
 } from "@shared/scene-schema";
 import { getAsset } from "@shared/asset-catalog";
+import type { LoadSource } from "@/lib/autosave-decision";
 
 const LOCAL_PREFIX = "miniverse:scene:v2:";
 
@@ -52,6 +53,8 @@ interface EditorState {
   future: SceneData[];
   savedAt: number | null;
   storageMode: "server" | "local" | "unknown";
+  /** 当前场景数据来源：server=服务端读取，local=读失败后回退的本地旧副本（只读，禁止自动回写） */
+  loadSource: LoadSource;
 
   setSplatLoad: (s: SplatLoadState) => void;
   setSplatProgress: (p: SplatProgress | null) => void;
@@ -111,6 +114,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   future: [],
   savedAt: null,
   storageMode: "unknown",
+  loadSource: "unknown",
 
   setSplatLoad: (splatLoad) => set({ splatLoad }),
   setSplatProgress: (splatProgress) => set({ splatProgress }),
@@ -119,7 +123,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setViewMode: (viewMode) => set({ viewMode }),
 
   setScene: (scene, sceneId) =>
-    set({ scene, sceneId, past: [], future: [], selectedId: null }),
+    set({ scene, sceneId, past: [], future: [], selectedId: null, loadSource: "server" }),
 
   select: (id) => set({ selectedId: id }),
   setGizmoMode: (gizmoMode) => set({ gizmoMode }),
@@ -322,7 +326,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
 
-  markSaved: (storageMode) => set({ savedAt: Date.now(), storageMode }),
+  // 成功写回服务端后，数据来源即视为服务端（用户确认覆盖本地副本后自动保存恢复）
+  markSaved: (storageMode) =>
+    set({
+      savedAt: Date.now(),
+      storageMode,
+      ...(storageMode === "server" ? { loadSource: "server" as LoadSource } : {}),
+    }),
 
   mirrorToLocal: () => {
     const { scene, sceneId } = get();
@@ -340,7 +350,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!raw) return false;
       const parsed = safeParseScene(JSON.parse(raw));
       if (!parsed.success) return false;
-      set({ scene: parsed.data, sceneId, past: [], future: [], selectedId: null });
+      set({ scene: parsed.data, sceneId, past: [], future: [], selectedId: null, loadSource: "local" });
       return true;
     } catch {
       return false;

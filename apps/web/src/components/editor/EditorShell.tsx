@@ -29,7 +29,8 @@ import SceneCanvas from "./SceneCanvas";
 import LeftPanel from "./LeftPanel";
 import PropertiesPanel from "./PropertiesPanel";
 import { useEditorStore, type ViewPreset } from "@/stores/editor-store";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { decideAutosave } from "@/lib/autosave-decision";
 
 interface EditorShellProps {
   sceneId: string;
@@ -38,6 +39,8 @@ interface EditorShellProps {
 export default function EditorShell({ sceneId }: EditorShellProps) {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** 读失败类型：unavailable=5xx/网络，missing=404（仅用于文案与提示，不参与自动保存判定） */
+  const [loadFailure, setLoadFailure] = useState<"unavailable" | "missing" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [health, setHealth] = useState<{ python: string | null; workerBusy: boolean; taskCount: number } | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
@@ -52,6 +55,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   const future = useEditorStore((s) => s.future);
   const savedAt = useEditorStore((s) => s.savedAt);
   const storageMode = useEditorStore((s) => s.storageMode);
+  const loadSource = useEditorStore((s) => s.loadSource);
   const splatLoad = useEditorStore((s) => s.splatLoad);
   const splatProgress = useEditorStore((s) => s.splatProgress);
   const viewMode = useEditorStore((s) => s.viewMode);
@@ -76,7 +80,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     setTimeout(() => setNotice(null), 2500);
   }, []);
 
-  // 加载场景
+  // 加载场景：读失败按类型分流（5xx/网络 vs 404），本地副本一律只读，不自动回写
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -84,15 +88,19 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
         const { scene: loaded } = await api.getScene(sceneId);
         if (alive) {
           setScene(loaded, sceneId);
+          setLoadFailure(null);
           setReady(true);
         }
-      } catch {
+      } catch (e) {
+        if (!alive) return;
+        const missing = e instanceof ApiError && e.status === 404;
+        setLoadFailure(missing ? "missing" : "unavailable");
         if (restoreFromLocal(sceneId)) {
-          flash("服务端场景缺失，已从本地缓存恢复");
+          flash(missing ? "场景已不存在，可手动用本地副本重建" : "服务端暂不可用，已载入本地副本（只读）");
         } else {
-          setLoadError("场景不存在且无本地缓存");
+          setLoadError(missing ? "场景已不存在，且无本地缓存" : "服务端暂不可用，且无本地缓存");
         }
-        if (alive) setReady(true);
+        setReady(true);
       }
     })();
     return () => {
@@ -100,9 +108,10 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     };
   }, [sceneId, setScene, restoreFromLocal, flash]);
 
-  // 自动保存（防抖 800ms）
+  // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据
   useEffect(() => {
-    if (!ready || !scene) return;
+    const decision = decideAutosave({ ready, hasScene: scene !== null, loadSource });
+    if (decision !== "write" || !scene) return;
     const t = setTimeout(async () => {
       mirrorToLocal();
       try {
@@ -113,7 +122,23 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
       }
     }, 800);
     return () => clearTimeout(t);
-  }, [scene, ready, sceneId, mirrorToLocal, markSaved]);
+  }, [scene, ready, sceneId, loadSource, mirrorToLocal, markSaved]);
+
+  // 本地副本回写服务端：仅由用户点击 + 二次确认触发
+  const handleOverwriteServer = useCallback(async () => {
+    const current = useEditorStore.getState().scene;
+    if (!current) return;
+    if (!window.confirm("确定用本地副本覆盖服务端场景？服务端当前内容会被丢弃，且无法撤销。")) return;
+    try {
+      await api.saveScene(current);
+      markSaved("server");
+      setLoadFailure(null);
+      flash("已用本地副本覆盖服务端");
+    } catch {
+      markSaved("local");
+      flash("覆盖失败：服务端仍不可用");
+    }
+  }, [markSaved, flash]);
 
   // 快捷键
   useEffect(() => {
@@ -391,6 +416,8 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
           <button
             className="btn-ghost"
+            disabled={loadSource === "local"}
+            title={loadSource === "local" ? "只读模式：请用本地副本覆盖服务端" : "保存到服务端"}
             onClick={async () => {
               if (!scene) return;
               mirrorToLocal();
@@ -435,6 +462,32 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           />
         </div>
       </header>
+
+      {/* ── 只读本地副本提示条（读失败回退时出现，回写需用户显式确认） ── */}
+      {loadSource === "local" && loadFailure && (
+        <div
+          className="flex shrink-0 items-center gap-2 px-3 py-1.5 text-[10px]"
+          style={{
+            background: "rgba(245,158,11,0.08)",
+            borderBottom: "1px solid rgba(245,158,11,0.2)",
+            color: "#fbbf24",
+          }}
+        >
+          <HardDrive size={11} style={{ color: "#fbbf24" }} />
+          <span>
+            {loadFailure === "missing"
+              ? "场景已不存在，可手动用本地副本重建"
+              : "服务端暂不可用，已载入本地副本（只读）"}
+          </span>
+          <button
+            className="btn-ghost ml-1"
+            style={{ color: "#fbbf24", borderColor: "rgba(245,158,11,0.3)" }}
+            onClick={handleOverwriteServer}
+          >
+            用本地副本覆盖服务端
+          </button>
+        </div>
+      )}
 
       {/* ── 主体三栏 ── */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -610,7 +663,16 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
       >
         {/* 存储状态 */}
         <span className="flex items-center gap-1.5">
-          {storageMode === "server" ? (
+          {loadSource === "local" ? (
+            <>
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ background: "#fbbf24", boxShadow: "0 0 4px rgba(251,191,36,0.7)" }}
+              />
+              <HardDrive size={10} style={{ color: "#fbbf24" }} />
+              <span style={{ color: "#fbbf24" }}>本地副本（只读）</span>
+            </>
+          ) : storageMode === "server" ? (
             <>
               <span
                 className="h-1.5 w-1.5 rounded-full"
