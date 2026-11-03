@@ -441,8 +441,13 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           </button>
           <button
             className="btn-ghost"
+            disabled={loadSource === "local"}
+            title={loadSource === "local" ? "只读模式：请用本地副本覆盖服务端" : "重置为演示场景"}
             style={{ color: "#fbbf24", borderColor: "rgba(245,158,11,0.2)" }}
             onClick={() => {
+              if (loadSource === "local") return;
+              // 会清空全部家具与重建背景并自动写回服务端，必须二次确认
+              if (!window.confirm("确定重置为演示场景？当前场景的全部家具与重建背景都会被清空，并替换为内置演示场景，改动将在 0.8 秒后自动写入服务端。")) return;
               pushHistory();
               resetToDemo();
             }}
@@ -611,10 +616,15 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
                 </Link>
               )}
               <button
-                onClick={() =>
-                  setReconstruction({ format: "none", url: null, status: "none", taskId: null })
-                }
-                className="ml-1 rounded p-0.5 text-slate-500 transition hover:text-slate-200"
+                disabled={loadSource === "local"}
+                title={loadSource === "local" ? "只读模式：请用本地副本覆盖服务端" : "退出重建背景"}
+                onClick={() => {
+                  if (loadSource === "local") return;
+                  // 会清空重建背景并自动写回服务端，必须二次确认
+                  if (!window.confirm("确定退出重建背景？当前场景的高斯重建背景会被清空并恢复程序化房间外壳，改动将在 0.8 秒后自动写入服务端。")) return;
+                  setReconstruction({ format: "none", url: null, status: "none", taskId: null });
+                }}
+                className="ml-1 rounded p-0.5 text-slate-500 transition hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
                 style={{ lineHeight: 1 }}
               >
                 <X size={12} />
