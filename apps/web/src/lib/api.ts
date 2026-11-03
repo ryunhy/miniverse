@@ -10,6 +10,14 @@ export interface SceneSummary {
   objectCount: number;
 }
 
+/** 历史版本条目（只读快照摘要），revision 即被覆盖前的服务端版本号 */
+export interface SceneHistoryEntry {
+  revision: number;
+  updatedAt: string;
+  name: string;
+  objectCount: number;
+}
+
 export interface TaskRow {
   id: string;
   status: "pending" | "processing" | "completed" | "failed" | "canceled";
@@ -105,6 +113,12 @@ export const api = {
       },
       body: JSON.stringify(scene),
     }).then((r) => json<{ scene: SceneData; revision: number; savedAt: string }>(r)),
+  /** 历史版本列表（revision 倒序） */
+  listSceneHistory: (id: string) =>
+    fetch(`/api/scenes/${id}/history`).then((r) => json<{ entries: SceneHistoryEntry[] }>(r)),
+  /** 读取单个历史版本内容（用于恢复） */
+  getSceneHistoryVersion: (id: string, revision: number) =>
+    fetch(`/api/scenes/${id}/history/${revision}`).then((r) => json<{ scene: SceneData }>(r)),
   listTasks: () => fetch("/api/reconstructions").then((r) => json<{ tasks: TaskRow[] }>(r)),
   getTask: (id: string) =>
     fetch(`/api/reconstructions/${id}`).then((r) =>

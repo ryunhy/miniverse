@@ -24,12 +24,13 @@ import {
   WifiOff,
   Cpu,
   ChevronLeft,
+  History,
 } from "lucide-react";
 import SceneCanvas from "./SceneCanvas";
 import LeftPanel from "./LeftPanel";
 import PropertiesPanel from "./PropertiesPanel";
 import { useEditorStore, type ViewPreset } from "@/stores/editor-store";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, type SceneHistoryEntry } from "@/lib/api";
 import { decideAutosave, snapshotScene } from "@/lib/autosave-decision";
 import type { SceneData } from "@shared/scene-schema";
 
@@ -47,6 +48,11 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   const [conflict, setConflict] = useState<{ server: SceneData | null; serverRevision: number } | null>(null);
   /** 用户取消冲突后暂停自动保存：避免「取消 → 立刻又自动重试 → 又弹窗」的死循环 */
   const [autosaveHold, setAutosaveHold] = useState(false);
+  /** 历史版本面板：只读快照列表，恢复走 CAS 追加为新版本 */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<SceneHistoryEntry[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [restoring, setRestoring] = useState<number | null>(null);
   const [health, setHealth] = useState<{ python: string | null; workerBusy: boolean; taskCount: number } | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -216,6 +222,61 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     setAutosaveHold(true);
     flash("已取消写入：本地改动仍保留，自动保存已暂停（点「保存」可重试）");
   }, [flash]);
+
+  // 历史版本：打开面板即拉取只读快照列表（revision 倒序）
+  const openHistory = useCallback(async () => {
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    try {
+      const { entries } = await api.listSceneHistory(sceneId);
+      setHistoryEntries(entries);
+    } catch (e) {
+      setHistoryEntries([]);
+      flash(`历史版本读取失败：${e instanceof Error ? e.message : "服务端不可用"}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [sceneId, flash]);
+
+  /**
+   * 恢复历史版本：读取快照内容 → 以当前服务端版本号为基线 CAS 写入。
+   * 写入是「追加新版本」，不改写历史；服务端在落盘前会把当前版本再快照一份。
+   */
+  const restoreHistory = useCallback(
+    async (revision: number) => {
+      if (restoring !== null) return;
+      const current = useEditorStore.getState().scene;
+      if (!current) {
+        flash("场景未加载，无法恢复");
+        return;
+      }
+      setRestoring(revision);
+      try {
+        const { scene: version } = await api.getSceneHistoryVersion(sceneId, revision);
+        const res = await api.saveScene(version, { expectedRevision: current.metadata.revision });
+        setScene(res.scene, sceneId);
+        markSaved("server", res.revision);
+        mirrorToLocal();
+        setConflict(null);
+        setAutosaveHold(false);
+        flash(`已恢复 v${revision} 的内容，并保存为新版本 v${res.revision}`);
+        const { entries } = await api.listSceneHistory(sceneId);
+        setHistoryEntries(entries);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) {
+          flash("恢复失败：服务端已被其他会话修改，请刷新页面后重试");
+          api.listSceneHistory(sceneId).then(({ entries }) => setHistoryEntries(entries)).catch(() => {});
+        } else if (e instanceof ApiError && e.status === 404) {
+          flash("恢复失败：该历史版本不存在或已损坏");
+        } else {
+          flash(`恢复失败：${e instanceof Error ? e.message : "服务端不可用"}`);
+        }
+      } finally {
+        setRestoring(null);
+      }
+    },
+    [sceneId, restoring, setScene, markSaved, mirrorToLocal, flash]
+  );
 
   // 快捷键
   useEffect(() => {
@@ -510,6 +571,14 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
             }}
           >
             <Save size={12} /> 保存
+          </button>
+          <button
+            className="btn-ghost"
+            onClick={() => (historyOpen ? setHistoryOpen(false) : void openHistory())}
+            title="查看该场景的历史版本并恢复"
+            style={historyOpen ? { color: "#c4b5fd", borderColor: "rgba(168,85,247,0.35)" } : {}}
+          >
+            <History size={12} /> 历史版本
           </button>
           <button className="btn-ghost" onClick={handleExport}>
             <Download size={12} /> 导出
@@ -828,6 +897,71 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           )}
         </span>
       </footer>
+
+      {/* 历史版本面板：只读列表，恢复走 CAS 追加为新版本（不改写历史） */}
+      {historyOpen && (
+        <div className="fixed right-4 top-14 z-40 flex max-h-[60vh] w-[26rem] flex-col rounded-lg border border-slate-700 bg-slate-900 shadow-2xl">
+          <div className="flex items-center gap-2 border-b border-slate-700/60 px-4 py-2.5">
+            <History size={13} style={{ color: "#c4b5fd" }} />
+            <span className="text-xs font-semibold text-slate-200">历史版本</span>
+            <button
+              className="ml-auto rounded p-0.5 text-slate-500 transition hover:text-slate-200"
+              onClick={() => setHistoryOpen(false)}
+              title="关闭"
+            >
+              <X size={13} />
+            </button>
+          </div>
+          <div className="px-4 py-2 text-[10px] leading-relaxed text-slate-500">
+            每次覆盖写入前自动快照，最多保留最近 20 份。恢复会以当前版本号为基线追加为新版本，不改写历史。
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+            {historyLoading ? (
+              <div className="flex items-center gap-2 px-2 py-3 text-[11px] text-slate-400">
+                <Loader2 size={11} className="animate-spin" /> 读取中…
+              </div>
+            ) : !historyEntries || historyEntries.length === 0 ? (
+              <div className="px-2 py-3 text-[11px] text-slate-500">暂无历史版本（尚未发生过覆盖写入）</div>
+            ) : (
+              historyEntries.map((entry) => (
+                <div
+                  key={entry.revision}
+                  className="mb-1 flex items-center gap-2 rounded px-2 py-1.5 transition hover:bg-slate-800/60"
+                >
+                  <span
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-mono"
+                    style={{ background: "rgba(139,92,246,0.15)", color: "#c4b5fd" }}
+                  >
+                    v{entry.revision}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[11px] text-slate-300">
+                      {entry.objectCount} 件家具 · {entry.name}
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      {new Date(entry.updatedAt).toLocaleString("zh-CN", { hour12: false })}
+                    </div>
+                  </div>
+                  <button
+                    className="shrink-0 rounded border border-slate-600 px-2 py-1 text-[10px] text-slate-300 transition hover:bg-slate-700/40 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={loadSource === "local" || conflict !== null || restoring !== null}
+                    title={
+                      loadSource === "local"
+                        ? "只读模式：请先用本地副本覆盖服务端"
+                        : conflict
+                          ? "请先处理保存冲突"
+                          : "恢复该版本（追加为新版本）"
+                    }
+                    onClick={() => void restoreHistory(entry.revision)}
+                  >
+                    {restoring === entry.revision ? "恢复中…" : "恢复"}
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 409 版本冲突：非模态浮层，三选项，绝不静默失败；处理前仍可继续编辑（自动保存已暂停） */}
       {conflict && (

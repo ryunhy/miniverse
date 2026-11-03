@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   deleteScene,
   getScene,
+  getSceneHistoryVersion,
+  listSceneHistory,
   listScenes,
   putScene,
   RevisionConflictError,
@@ -137,5 +139,56 @@ describe("版本号（revision）与 409 冲突", () => {
     delete raw.metadata.revision;
     writeFileSync(p, JSON.stringify(raw, null, 2));
     expect(getScene(saved.sceneId)!.metadata.revision).toBe(0);
+  });
+});
+
+describe("历史版本读取（listSceneHistory / getSceneHistoryVersion）", () => {
+  it("列表按 revision 倒序，含名称与家具数摘要", () => {
+    const v0 = putScene(createDemoScene()); // rev0：7 件家具
+    const v1 = putScene({ ...v0, objects: v0.objects.slice(0, 5), metadata: { ...v0.metadata, name: "少两件" } });
+    const v2 = putScene({ ...v1, objects: v1.objects.slice(0, 3), metadata: { ...v1.metadata, name: "少四件" } });
+    expect(v2.metadata.revision).toBe(2);
+
+    const entries = listSceneHistory(v0.sceneId);
+    expect(entries.map((e) => e.revision)).toEqual([1, 0]);
+    expect(entries[0].objectCount).toBe(5);
+    expect(entries[0].name).toBe("少两件");
+    expect(entries[1].objectCount).toBe(7);
+  });
+
+  it("没有历史目录时返回空列表（不抛错）", () => {
+    const v0 = putScene(createEmptyScene("无历史"));
+    expect(listSceneHistory(v0.sceneId)).toEqual([]);
+  });
+
+  it("非法场景 ID（路径穿越）被拒绝", () => {
+    expect(() => listSceneHistory("../../etc/passwd")).toThrow(ValidationError);
+    expect(() => getSceneHistoryVersion("../x", 0)).toThrow(ValidationError);
+    expect(() => getScene("../../etc/passwd")).toThrow(ValidationError);
+  });
+
+  it("读取单个历史版本：存在返回内容，不存在返回 null，非法版本号抛错", () => {
+    const v0 = putScene(createEmptyScene("可恢复"));
+    const v1 = putScene(v0); // 快照 rev0
+    const restored = getSceneHistoryVersion(v1.sceneId, 0)!;
+    expect(restored.metadata.revision).toBe(0);
+    expect(restored.metadata.name).toBe("可恢复");
+    expect(getSceneHistoryVersion(v1.sceneId, 99)).toBeNull();
+    expect(() => getSceneHistoryVersion(v1.sceneId, -1)).toThrow(ValidationError);
+    expect(() => getSceneHistoryVersion(v1.sceneId, 1.5)).toThrow(ValidationError);
+  });
+
+  it("恢复历史版本写入为追加的新版本，且当前版本被快照保留（历史不改写）", () => {
+    const v0 = putScene(createDemoScene());
+    const v1 = putScene({ ...v0, objects: v0.objects.slice(0, 5), metadata: { ...v0.metadata, name: "删了两件" } });
+    // 恢复 rev0 内容，基线为当前 rev1
+    const restored = putScene(getSceneHistoryVersion(v1.sceneId, 0)!, 1);
+    expect(restored.metadata.revision).toBe(2);
+    expect(restored.objects).toHaveLength(7);
+    // 恢复前的 v1 也被快照，历史里原 v0 快照仍在
+    const entries = listSceneHistory(v1.sceneId).map((e) => e.revision);
+    expect(entries).toEqual([1, 0]);
+    expect(getSceneHistoryVersion(v1.sceneId, 0)!.objects).toHaveLength(7);
+    expect(getSceneHistoryVersion(v1.sceneId, 1)!.objects).toHaveLength(5);
   });
 });

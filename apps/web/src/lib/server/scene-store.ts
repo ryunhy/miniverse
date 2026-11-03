@@ -56,8 +56,61 @@ function snapshotHistory(sceneId: string, currentPath: string, currentRevision: 
   }
 }
 
-function scenePath(sceneId: string): string {
+export interface SceneHistoryEntry {
+  revision: number;
+  updatedAt: string;
+  name: string;
+  objectCount: number;
+}
+
+/** 场景 ID 校验（同时用于历史目录，防止路径穿越） */
+function assertSceneId(sceneId: string): void {
   if (!/^[a-f0-9-]{36}$/i.test(sceneId)) throw new ValidationError("非法场景 ID");
+}
+
+/**
+ * 历史版本列表（revision 倒序）：只读 _history/<id>/<rev>.json。
+ * 场景隔离靠目录 + 严格 ID 校验；损坏快照跳过，不影响其它条目。
+ */
+export function listSceneHistory(sceneId: string): SceneHistoryEntry[] {
+  assertSceneId(sceneId);
+  const dir = historyDir(sceneId);
+  if (!fs.existsSync(dir)) return [];
+  const entries: SceneHistoryEntry[] = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!/^\d+\.json$/.test(f)) continue;
+    try {
+      const parsed = safeParseScene(JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")));
+      if (!parsed.success) continue;
+      entries.push({
+        revision: parsed.data.metadata.revision,
+        updatedAt: parsed.data.metadata.updatedAt,
+        name: parsed.data.metadata.name,
+        objectCount: parsed.data.objects.length,
+      });
+    } catch {
+      // 跳过损坏快照
+    }
+  }
+  return entries.sort((a, b) => b.revision - a.revision);
+}
+
+/** 读取单个历史版本内容（用于前端恢复）；版本号必须是非负整数 */
+export function getSceneHistoryVersion(sceneId: string, revision: number): SceneData | null {
+  assertSceneId(sceneId);
+  if (!Number.isInteger(revision) || revision < 0) throw new ValidationError("非法版本号");
+  const p = path.join(historyDir(sceneId), `${revision}.json`);
+  if (!fs.existsSync(p)) return null;
+  try {
+    const parsed = safeParseScene(JSON.parse(fs.readFileSync(p, "utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function scenePath(sceneId: string): string {
+  assertSceneId(sceneId);
   return path.join(dataDir(), "scenes", `${sceneId}.json`);
 }
 
