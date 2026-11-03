@@ -96,6 +96,8 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           setScene(loaded, sceneId);
           setLoadFailure(null);
           setReady(true);
+          // 刷新本地镜像（仅 localStorage，不写服务端）：保证离线/场景被删时仍有本地副本
+          mirrorToLocal();
         }
       } catch (e) {
         if (!alive) return;
@@ -112,7 +114,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     return () => {
       alive = false;
     };
-  }, [sceneId, setScene, restoreFromLocal, flash]);
+  }, [sceneId, setScene, restoreFromLocal, mirrorToLocal, flash]);
 
   // 内容是否相对已持久化基线有变化：用序列化比对，避免 dirty 标记漏置位
   const sceneDirty = scene !== null && savedBaseline !== null && snapshotScene(scene) !== savedBaseline;
