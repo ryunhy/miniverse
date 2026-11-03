@@ -34,17 +34,22 @@ export interface TaskEvent {
 /** 带 HTTP 状态码的请求错误：调用方据此区分 404（场景不存在）与 5xx/网络（服务端暂不可用） */
 export class ApiError extends Error {
   readonly status: number;
+  /** 服务端返回的响应体（409 冲突时携带最新 revision 与最新 scene） */
+  readonly payload: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, payload?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.payload = payload;
   }
 }
 
 async function json<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError((body as { error?: string }).error || `请求失败（${res.status}）`, res.status);
+  if (!res.ok) {
+    throw new ApiError((body as { error?: string }).error || `请求失败（${res.status}）`, res.status, body);
+  }
   return body as T;
 }
 
@@ -57,11 +62,11 @@ function isRetryableReadError(e: unknown): boolean {
 /** 有限次退避重试（2 次，300ms/900ms），避免服务端瞬时 5xx 直接退化成读失败 */
 const READ_RETRY_DELAYS_MS = [300, 900];
 
-async function getSceneWithRetry(id: string): Promise<{ scene: SceneData }> {
+async function getSceneWithRetry(id: string): Promise<{ scene: SceneData; revision: number }> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= READ_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
-      return await fetch(`/api/scenes/${id}`).then((r) => json<{ scene: SceneData }>(r));
+      return await fetch(`/api/scenes/${id}`).then((r) => json<{ scene: SceneData; revision: number }>(r));
     } catch (e) {
       lastError = e;
       if (!isRetryableReadError(e) || attempt === READ_RETRY_DELAYS_MS.length) break;
@@ -86,12 +91,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ taskId }),
     }).then((r) => json<{ scene: SceneData }>(r)),
-  saveScene: (scene: SceneData) =>
+  /**
+   * 保存场景。默认带上本地记录的 revision 做 CAS（If-Match），
+   * 服务端发现已被其它会话改过时返回 409；forceRevision 用于冲突对话框中
+   * 「用我的覆盖服务端」——以服务端最新 revision 为基线强制写入。
+   */
+  saveScene: (scene: SceneData, opts?: { expectedRevision?: number }) =>
     fetch(`/api/scenes/${scene.sceneId}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": `"${opts?.expectedRevision ?? scene.metadata.revision}"`,
+      },
       body: JSON.stringify(scene),
-    }).then((r) => json<{ savedAt: string }>(r)),
+    }).then((r) => json<{ scene: SceneData; revision: number; savedAt: string }>(r)),
   listTasks: () => fetch("/api/reconstructions").then((r) => json<{ tasks: TaskRow[] }>(r)),
   getTask: (id: string) =>
     fetch(`/api/reconstructions/${id}`).then((r) =>

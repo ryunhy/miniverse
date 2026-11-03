@@ -31,6 +31,7 @@ import PropertiesPanel from "./PropertiesPanel";
 import { useEditorStore, type ViewPreset } from "@/stores/editor-store";
 import { api, ApiError } from "@/lib/api";
 import { decideAutosave, snapshotScene } from "@/lib/autosave-decision";
+import type { SceneData } from "@shared/scene-schema";
 
 interface EditorShellProps {
   sceneId: string;
@@ -42,6 +43,10 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   /** 读失败类型：unavailable=5xx/网络，missing=404（仅用于文案与提示，不参与自动保存判定） */
   const [loadFailure, setLoadFailure] = useState<"unavailable" | "missing" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** 保存遇到 409：必须由用户三选一，绝不静默失败 */
+  const [conflict, setConflict] = useState<{ local: SceneData; server: SceneData | null; serverRevision: number } | null>(
+    null
+  );
   const [health, setHealth] = useState<{ python: string | null; workerBusy: boolean; taskCount: number } | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -112,6 +117,37 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   // 内容是否相对已持久化基线有变化：用序列化比对，避免 dirty 标记漏置位
   const sceneDirty = scene !== null && savedBaseline !== null && snapshotScene(scene) !== savedBaseline;
 
+  /**
+   * 统一保存入口：带 revision 做 CAS。409 时不写、不吞错，弹出冲突对话框
+   * 让用户三选一；其他失败退回本地缓存并保留 dirty 状态。
+   */
+  const saveToServer = useCallback(
+    async (target: SceneData, expectedRevision?: number): Promise<"ok" | "conflict" | "failed"> => {
+      try {
+        const res = await api.saveScene(
+          target,
+          expectedRevision !== undefined ? { expectedRevision } : undefined
+        );
+        markSaved("server", res.revision);
+        return "ok";
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) {
+          const payload = e.payload as { revision?: number; scene?: SceneData } | undefined;
+          const serverScene = payload?.scene ?? null;
+          setConflict({
+            local: target,
+            server: serverScene,
+            serverRevision: payload?.revision ?? serverScene?.metadata.revision ?? 0,
+          });
+          return "conflict";
+        }
+        markSaved("local");
+        return "failed";
+      }
+    },
+    [markSaved]
+  );
+
   // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据；
   // 内容与服务端一致（dirty=false）也跳过，避免加载后盲写覆盖这半秒内别处的改动。
   useEffect(() => {
@@ -124,32 +160,54 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     if (decision !== "write" || !scene) return;
     const t = setTimeout(async () => {
       mirrorToLocal();
-      const sent = snapshotScene(scene);
-      try {
-        await api.saveScene(scene);
-        markSaved("server", sent);
-      } catch {
-        markSaved("local");
-      }
+      await saveToServer(scene);
     }, 800);
     return () => clearTimeout(t);
-  }, [scene, sceneDirty, ready, sceneId, loadSource, mirrorToLocal, markSaved]);
+  }, [scene, sceneDirty, ready, sceneId, loadSource, mirrorToLocal, saveToServer]);
 
   // 本地副本回写服务端：仅由用户点击 + 二次确认触发
   const handleOverwriteServer = useCallback(async () => {
     const current = useEditorStore.getState().scene;
     if (!current) return;
     if (!window.confirm("确定用本地副本覆盖服务端场景？服务端当前内容会被丢弃，且无法撤销。")) return;
-    try {
-      await api.saveScene(current);
-      markSaved("server", snapshotScene(current));
+    const result = await saveToServer(current);
+    if (result === "ok") {
       setLoadFailure(null);
       flash("已用本地副本覆盖服务端");
-    } catch {
-      markSaved("local");
+    } else if (result === "failed") {
       flash("覆盖失败：服务端仍不可用");
     }
-  }, [markSaved, flash]);
+  }, [saveToServer, flash]);
+
+  // 409 冲突三选项：以服务端版本覆盖本地
+  const resolveConflictUseServer = useCallback(() => {
+    if (!conflict?.server) return;
+    setScene(conflict.server, sceneId);
+    mirrorToLocal();
+    setConflict(null);
+    setLoadFailure(null);
+    flash("已载入服务端最新版本，本地改动已丢弃");
+  }, [conflict, setScene, sceneId, mirrorToLocal, flash]);
+
+  // 409 冲突三选项：用我的内容强制覆盖服务端（以冲突对话框里的最新 revision 为基线）
+  const resolveConflictUseMine = useCallback(async () => {
+    if (!conflict) return;
+    const result = await saveToServer(conflict.local, conflict.serverRevision);
+    if (result === "ok") {
+      setConflict(null);
+      setLoadFailure(null);
+      flash("已用本地内容覆盖服务端");
+    } else if (result === "failed") {
+      flash("覆盖失败：服务端不可用，本地内容已保留");
+    }
+    // result=conflict：saveToServer 已更新冲突对话框为最新服务端版本，保持弹窗
+  }, [conflict, saveToServer, flash]);
+
+  // 409 冲突三选项：取消——不写服务端，保留本地内容
+  const resolveConflictCancel = useCallback(() => {
+    setConflict(null);
+    flash("已取消：未写入服务端，本地内容已保留");
+  }, [flash]);
 
   // 快捷键
   useEffect(() => {
@@ -432,14 +490,9 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
             onClick={async () => {
               if (!scene) return;
               mirrorToLocal();
-              try {
-                await api.saveScene(scene);
-                markSaved("server", snapshotScene(scene));
-                flash("已保存到服务端");
-              } catch {
-                markSaved("local");
-                flash("服务端不可用，已写入本地缓存");
-              }
+              const result = await saveToServer(scene);
+              if (result === "ok") flash("已保存到服务端");
+              else if (result === "failed") flash("服务端不可用，已写入本地缓存");
             }}
           >
             <Save size={12} /> 保存
@@ -761,6 +814,41 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           )}
         </span>
       </footer>
+
+      {/* 409 版本冲突：三选项，绝不静默失败 */}
+      {conflict && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-lg rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-2xl">
+            <div className="mb-2 text-sm font-semibold" style={{ color: "#fbbf24" }}>
+              保存冲突：服务端已被其他会话修改
+            </div>
+            <div className="mb-4 text-xs leading-relaxed text-slate-400">
+              本地记录的版本号与服务端当前版本（revision {conflict.serverRevision}）不一致，
+              为避免覆盖别人的改动，<span style={{ color: "#f87171" }}>本次未写入服务端</span>。请选择处理方式：
+            </div>
+            <div className="flex flex-col gap-2">
+              <button
+                className="rounded border border-sky-500/40 px-3 py-2 text-left text-xs text-sky-300 transition hover:bg-sky-500/10"
+                onClick={resolveConflictUseServer}
+              >
+                用服务端版本覆盖本地（丢弃我的改动）
+              </button>
+              <button
+                className="rounded border border-amber-500/40 px-3 py-2 text-left text-xs text-amber-300 transition hover:bg-amber-500/10"
+                onClick={resolveConflictUseMine}
+              >
+                用我的内容覆盖服务端（以服务端最新版本号为基线强制写入）
+              </button>
+              <button
+                className="rounded border border-slate-600 px-3 py-2 text-left text-xs text-slate-400 transition hover:bg-slate-700/30"
+                onClick={resolveConflictCancel}
+              >
+                取消（不写服务端，保留本地内容）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

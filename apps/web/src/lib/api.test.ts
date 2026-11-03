@@ -12,6 +12,51 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("saveScene 版本号 CAS（If-Match）", () => {
+  const scene = (revision: number) => ({ sceneId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", metadata: { revision } });
+
+  it("默认携带本地 revision 作为 If-Match，并返回服务端最新 revision", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(200, { scene: {}, revision: 3 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await api.saveScene(scene(2) as never);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/scenes/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    expect(init.method).toBe("PUT");
+    expect((init.headers as Record<string, string>)["If-Match"]).toBe('"2"');
+    expect(res.revision).toBe(3);
+  });
+
+  it("显式 expectedRevision 优先（冲突对话框强制覆盖用最新版本号）", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(200, { scene: {}, revision: 5 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.saveScene(scene(1) as never, { expectedRevision: 4 });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["If-Match"]).toBe('"4"');
+  });
+
+  it("409 抛出带 payload 的 ApiError（含服务端 revision 与 scene）", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        response(409, {
+          error: "版本冲突：场景已被其他会话修改",
+          code: "revision_conflict",
+          revision: 7,
+          scene: { sceneId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", metadata: { revision: 7 } },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await api.saveScene(scene(2) as never).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(409);
+    expect((error as ApiError).payload).toMatchObject({ code: "revision_conflict", revision: 7 });
+  });
+});
+
 describe("getScene 读失败重试（仅 5xx/网络）", () => {
   it("瞬时 5xx 后成功：重试一次即返回场景", async () => {
     const fetchMock = vi

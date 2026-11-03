@@ -96,6 +96,8 @@ export const metadataSchema = z.object({
   /** true = 内置演示场景 */
   demo: z.boolean().default(false),
   note: z.string().max(300).optional(),
+  /** 服务端版本号：每次成功落盘 +1，用于写前 CAS 校验；老文件缺省 0（不做破坏性迁移） */
+  revision: z.number().int().min(0).default(0),
 });
 
 export const sceneDataSchema = z.object({

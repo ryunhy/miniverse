@@ -83,7 +83,7 @@ interface EditorState {
   pushHistory: () => void;
   undo: () => void;
   redo: () => void;
-  markSaved: (mode: "server" | "local", baseline?: string) => void;
+  markSaved: (mode: "server" | "local", revision?: number) => void;
   mirrorToLocal: () => void;
   restoreFromLocal: (sceneId: string) => boolean;
 }
@@ -339,12 +339,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   // 成功写回服务端后，数据来源即视为服务端（用户确认覆盖本地副本后自动保存恢复）
-  markSaved: (storageMode, baseline) =>
-    set({
-      savedAt: Date.now(),
-      storageMode,
-      ...(baseline !== undefined ? { savedBaseline: baseline } : {}),
-      ...(storageMode === "server" ? { loadSource: "server" as LoadSource } : {}),
+  markSaved: (storageMode, revision) =>
+    set((state) => {
+      // 服务端会递增 revision：同步到内存场景，并把「含新 revision」的内容记为基线，
+      // 否则下一次保存会带着过期 revision 再次 409
+      const scene =
+        state.scene && revision !== undefined
+          ? { ...state.scene, metadata: { ...state.scene.metadata, revision } }
+          : state.scene;
+      const savedToServer = storageMode === "server";
+      return {
+        scene,
+        savedAt: Date.now(),
+        storageMode,
+        ...(savedToServer && scene ? { savedBaseline: snapshotScene(scene) } : {}),
+        ...(savedToServer ? { loadSource: "server" as LoadSource } : {}),
+      };
     }),
 
   mirrorToLocal: () => {
