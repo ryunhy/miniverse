@@ -166,20 +166,23 @@ def run_task(task_id: str, data_dir: Path) -> int:
             ctx.stage("export", 0.9)
 
             ply = export_gaussian_splat(ctx.work_dir, run_dir, ctx.export_dir)
-            ctx.report(
-                "completed",
-                stage="done",
-                progress=1.0,
-                result={
-                    "plyPath": str(ply.relative_to(data_dir)).replace("\\", "/"),
-                    "plyBytes": ply.stat().st_size,
-                    "gaussians": "see-metadata",
-                    "env": env_info,
-                    "resolution": resolution,
-                    "steps": steps,
-                    "attempts": attempt + 1,
-                },
-            )
+            result = {
+                "plyPath": str(ply.relative_to(data_dir)).replace("\\", "/"),
+                "plyBytes": ply.stat().st_size,
+                "gaussians": "see-metadata",
+                "env": env_info,
+                "resolution": resolution,
+                "steps": steps,
+                "attempts": attempt + 1,
+            }
+
+            # 可选：3DGS → 网格（2DGS + TSDF + 纹理烘焙）。
+            # 这是增强项，失败不影响高斯交付——错误如实写进 result.mesh.error。
+            if bool(ctx.params.get("exportMesh", False)):
+                ctx.stage("mesh", 0.93)
+                result["mesh"] = _export_mesh_stage(ctx, run_dir, ply)
+
+            ctx.report("completed", stage="done", progress=1.0, result=result)
             log.info("任务完成 ✔  task=%s ply=%s", task_id, ply)
             return 0
 
@@ -197,6 +200,49 @@ def run_task(task_id: str, data_dir: Path) -> int:
     ctx.report("failed", stage="oom", error=f"多次降级后仍显存不足：{last_error}")
     log.error("任务失败（OOM 重试耗尽）")
     return 1
+
+
+def _export_mesh_stage(ctx: TaskContext, run_dir: Path, ply: Path) -> dict:
+    """3DGS → 网格增强阶段。任何异常都转成结构化结果，不中断任务。
+
+    参数（input.json → params）：
+      exportMesh      true 开启（默认关，网格比高斯慢很多）
+      meshIters       2DGS 训练步数（默认 15000）
+      meshTexSize     烘焙贴图边长（默认 4096）
+      meshVoxel       TSDF 体素边长（场景单位，默认 0.015）
+      meshFaces       目标面数上限（默认 250000）
+    """
+    t0 = time.time()
+    try:
+        from app.mesh import export_mesh  # noqa: PLC0415 - 重依赖，按需导入
+
+        config = run_dir / "config.yml"
+        if not config.exists():
+            configs = sorted(run_dir.rglob("config.yml"))
+            if not configs:
+                raise RuntimeError(f"未找到训练配置 config.yml（{run_dir}）")
+            config = configs[0]
+
+        log.info("网格导出开始：config=%s init=%s", config, ply.name)
+        res = export_mesh(
+            config_path=config,
+            export_dir=ctx.export_dir,
+            work_dir=ctx.work_dir,
+            iters=int(ctx.params.get("meshIters", 15000)),
+            tex_size=int(ctx.params.get("meshTexSize", 4096)),
+            voxel=float(ctx.params.get("meshVoxel", 0.015)),
+            target_faces=int(ctx.params.get("meshFaces", 250000)),
+            init_ply=ply,               # 用已收敛的 3DGS 热启动 2DGS
+            keep_views=False,
+            log=lambda m: log.info("%s", m),
+        )
+        out = res.to_dict()
+        out["seconds"] = round(time.time() - t0, 1)
+        log.info("网格导出完成：%s %.2fMB", out["glbPath"], out["glbBytes"] / 1048576)
+        return out
+    except Exception as e:  # noqa: BLE001 - 增强项失败不阻断主交付
+        log.exception("网格导出失败（高斯产物不受影响）")
+        return {"error": f"{type(e).__name__}: {e}", "seconds": round(time.time() - t0, 1)}
 
 
 def check_env() -> int:
@@ -227,7 +273,58 @@ def check_env() -> int:
         report["torch"] = None
         report["torch_cuda_available"] = False
         report["torch_import_error"] = f"{type(e).__name__}: {e}"
+
+    # 网格链路（exportMesh 可选增强，见 docs/MESH.md）：缺依赖不影响高斯交付，
+    # 但开启 exportMesh 前必须先看到这里全绿。
+    report["mesh"] = _probe_mesh_env()
+
     print(json.dumps(report, ensure_ascii=False, indent=2))
     ok = report["colmap"] and report["nerfstudio_ns_train"] and report.get("torch_cuda_available")
     print("\n结论：%s" % ("✅ 满足真实重建条件" if ok else "❌ 尚不满足（缺 COLMAP / Nerfstudio / CUDA，见 docs/INSTALL-Windows-WSL2.md）"))
+    mesh = report["mesh"]
+    if mesh["ready"]:
+        print("网格导出（exportMesh）：✅ 就绪")
+    else:
+        print(f"网格导出（exportMesh）：❌ 不可用 —— {mesh['missing']}，见 docs/MESH.md")
     return 0 if ok else 2
+
+
+def _probe_mesh_env() -> dict:
+    """探测 2DGS + TSDF 网格链路的依赖是否齐备。
+
+    分三档：库是否可导入（open3d/xatlas/trimesh）、gsplat CUDA 扩展是否可注入
+    （rasterization_2dgs 的唯一硬依赖）、nerfstudio 相机解析是否可用。
+    """
+    probe: dict = {"packages": {}, "gsplat_csrc": None, "nerfstudio": None}
+    missing: list[str] = []
+
+    for mod in ("open3d", "xatlas", "trimesh", "cv2"):
+        try:
+            m = __import__(mod)
+            probe["packages"][mod] = getattr(m, "__version__", "unknown")
+        except Exception as e:  # noqa: BLE001 - 依赖缺失如实记录
+            probe["packages"][mod] = None
+            missing.append(mod)
+
+    try:
+        from app.mesh.gsplat_bootstrap import bootstrap  # noqa: PLC0415
+
+        probe["gsplat_csrc"] = bool(bootstrap())
+    except Exception as e:  # noqa: BLE001
+        probe["gsplat_csrc"] = False
+        probe["gsplat_error"] = f"{type(e).__name__}: {e}"
+        missing.append("gsplat csrc")
+
+    try:
+        import nerfstudio  # noqa: F401,PLC0415 - 仅验证可导入
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415
+
+        probe["nerfstudio"] = _pkg_version("nerfstudio")
+    except Exception as e:  # noqa: BLE001
+        probe["nerfstudio"] = None
+        probe["nerfstudio_error"] = f"{type(e).__name__}: {e}"
+        missing.append("nerfstudio")
+
+    probe["ready"] = not missing
+    probe["missing"] = "、".join(missing) if missing else ""
+    return probe

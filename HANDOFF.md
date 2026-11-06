@@ -9,8 +9,8 @@
 核心产品能力（第一次真实照片重建全链路）**已于 2026-10-24 实证打通**，当前是"已验证的 MVP"，还不是商业化产品。
 
 - 代码：`C:\Users\WYX\.zcode\workspace\93096d68-ed46-47d7-8fe9-02b8d3f61fac\miniverse`（monorepo）
-- 已验证指标：104 张真实照片 → COLMAP sequential CPU ~20 分钟 → Splatfacto 7000 步/1200px → 106MB scene.ply，训练 16 分 13 秒，**显存峰值 2987MiB / 8GB（37%）**
-- 回归基线：vitest 33/33、tsc 0 错误、eslint 0 错误、next build EXIT=0（12 路由）
+- 已验证指标：104 张真实照片 → COLMAP sequential CPU ~20 分钟 → Splatfacto 7000 步/1200px → 106MB scene.ply，训练 16 分 13 秒，**显存峰值 2987MiB / 8GB（37%）**（首次验证基线；后续 30000 步重训产物为 119MB / 47.99 万高斯，见 PROGRESS「质量治理」节）
+- 回归基线（2026-11-02 实测）：vitest **45/45**、tsc 0 错误、eslint **2 errors + 1 warning**（2 errors 位于当时未提交的 `apps/web/src/components/mesh/MeshViewerCore.tsx`，属 P5 并行改动）、next build EXIT=0（**17 条路由**：6 页面含 `/_not-found` + 11 API）
 
 ## 二、环境与启动（两个世界，别搞混）
 
@@ -19,7 +19,7 @@
 cd <仓库>/miniverse
 npm install          # 首次
 npm run dev          # http://localhost:3000（首页自动进编辑器）
-npm test             # vitest 33 个用例
+npm test             # vitest 45 个用例（2026-11-02 实测）
 ```
 
 ### 重建世界（WSL2 Ubuntu 22.04，已装好）
@@ -47,7 +47,7 @@ data/           uploads / tasks(db) / scenes / processed / reconstructions
 
 关键不变量（改代码前必读，细节在 PROGRESS.md）：
 - **素材白名单**：objects[].assetId 只能取自 `packages/shared/src/asset-catalog.ts`
-- **坐标系**：米、Y 向上、家具原点=底部中心；3DGS 背景经 `SplatObject` 的 X180° 翻转 + 中位数稳健取景对齐（勿删，离群高斯会污染 min/max bbox）
+- **坐标系**：米、Y 向上、家具原点=底部中心；nerfstudio 导出的 PLY 竖直轴是 Z，3DGS 背景在 `SplatObject` 中用 **Rx(-90°)** 立起为 Y-up（演示 PLY 本身 Y-up 保持恒等）；**勿回退为 X180**（会把房间竖到编辑器 Z 轴）。取景用高斯中位数稳健对齐（勿删，离群高斯会污染 min/max bbox）
 - **AI 来源标注**：objects[].origin ∈ user/ai-detected/ai-inferred，禁止混淆
 - **诚实原则**：环境缺失/任务失败必须如实上报，禁止演示数据冒充重建结果
 
@@ -89,6 +89,7 @@ data/           uploads / tasks(db) / scenes / processed / reconstructions
 | 刷新后高斯视角被重置 | 旧版每次挂载强制取景 | schema camera.autoFrame 门控：取景/用户拖动后落 false，不再重置 |
 | 任务卡 pending 但已完成 | 快速任务无中间态 | 状态机已允许 pending→completed |
 | .wslconfig | 用户限 4GB 防吃满宿主 | 训练期临时 12GB（备份 .wslconfig.miniverse-backup），**用完必须恢复** |
+| gizmo 拖完撤销后画布像素对不上 | TransformControls 松手时 `dragging` 已置 false，R3F 的 click 把选择抢到松手位置下的地板/墙体 | `EditableSceneViewerCore` 的 `onClick` 用 `e.delta > 4` 过滤拖动结束的点击（勿删） |
 
 ## 六、验收红线（不许破坏）
 
@@ -96,3 +97,19 @@ data/           uploads / tasks(db) / scenes / processed / reconstructions
 2. 失败不删日志、不降验收标准；演示数据必须带 synthetic 标注，永不冒充重建
 3. 共享记忆库：开工先 memory_context，收尾必须 memory_write 沉淀
 4. 用户的 .wslconfig / 系统级配置改动必须备份原文件并在完成后恢复
+
+## 七、scene-manifest v1 客户端接入（2026-11-05，任务 #6638）
+
+**状态：已完成并实证。** `/reconstructions/<id>` 现在优先消费 `data/reconstructions/<id>/scene.json`
+（scene-manifest v1），渲染可编辑场景；清单不存在时回退到只读 `MeshViewer`，旧任务行为不变。
+
+- 服务端：`lib/server/recon-editable-scene.ts` + 三个路由
+  （`/scene`、`/scene/glb`、`/scene/edits`），布局 `scene-edits.json` 原子写入、`baseSceneVersion` 冲突 409。
+- 客户端：`components/mesh/EditableSceneViewer{,Core}.tsx`，支持画布点选、移动/旋转/缩放、
+  隐藏、移除/恢复家具、撤销（快照栈 50，Ctrl/Cmd+Z）、保存与刷新恢复、移除家具后的背景检查。
+- 验收：`tools/verify-scene-manifest-client.mjs` 驱动真实 headless Chrome（CDP），
+  选择 `selection_via=canvas`、变换 `transform_via=gizmo`、撤销后画布像素差 **0**、
+  刷新恢复 true；证据在 `docs/evidence/scene-manifest-client/`（JSON + 5 张 PNG）。
+- 背景检查在 `sample` 上如实报 `newHoles=1 / silhouetteMisses=10`（家具下方网格确有 1 条视线洞），
+  功能可用、结果未美化；契约与限制详见 **`docs/SCENE-MANIFEST.md`**。
+- 样例数据 `data/reconstructions/sample/` 来自集成批次 `outputs/integration/sample/`，`data/` 不入库。

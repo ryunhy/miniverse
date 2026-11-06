@@ -29,6 +29,9 @@ data/demo/*
 # 改动前快照（入库后 git 自身即备份，避免噪音）
 .backup-*/
 
+# Archify 生成的架构图产物（带时间戳目录，每次生成都会变，不入库）
+.archify/
+
 # Python
 __pycache__/
 *.pyc

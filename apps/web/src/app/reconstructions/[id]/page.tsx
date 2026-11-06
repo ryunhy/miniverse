@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { Loader2, CheckCircle2, XCircle, Clock, AlertTriangle, ArrowRight } from "lucide-react";
 import { api, type TaskRow, type TaskEvent } from "@/lib/api";
 import SplatViewer from "@/components/splat/SplatViewer";
+import MeshViewer from "@/components/mesh/MeshViewer";
+import EditableSceneViewer from "@/components/mesh/EditableSceneViewer";
 
 function NavHeader({ id }: { id: string | null }) {
   return (
@@ -64,6 +66,10 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  // 网格是可选增强产物：探测一次 /mesh 是否存在，决定是否展示网格查看器
+  const [hasMesh, setHasMesh] = useState(false);
+  // 场景清单（scene-manifest v1）优先：存在时可选中/变换/撤销并保存布局
+  const [sceneAvailable, setSceneAvailable] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -92,7 +98,31 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     };
   }, [id]);
 
-  if (error) {
+  // 任务完成后探测一次网格产物（404 = 未开启 exportMesh 或生成失败，静默回退到高斯）
+  useEffect(() => {
+    if (!id || task?.status !== "completed") return;
+    let alive = true;
+    fetch(`/api/reconstructions/${id}/mesh`, { method: "HEAD" })
+      .then((r) => alive && setHasMesh(r.ok))
+      .catch(() => alive && setHasMesh(false));
+    return () => {
+      alive = false;
+    };
+  }, [id, task?.status]);
+
+  // 场景清单探测：不依赖任务记录（交付的独立场景也要能在真实客户端打开）
+  useEffect(() => {
+    if (!id) return;
+    let alive = true;
+    fetch(`/api/reconstructions/${id}/scene`, { method: "HEAD", cache: "no-store" })
+      .then((r) => alive && setSceneAvailable(r.ok))
+      .catch(() => alive && setSceneAvailable(false));
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+
+  if (error && !sceneAvailable) {
     return (
       <div className="flex h-screen flex-col" style={{ background: "#030712" }}>
         <NavHeader id={id} />
@@ -206,6 +236,68 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
             </div>
           </div>
         )}
+
+        {/* 可编辑场景（scene-manifest v1）：选中、移动/旋转/缩放、撤销、保存与刷新恢复 */}
+        {sceneAvailable ? (
+          <section
+            className="overflow-hidden rounded-2xl mv-fade-in"
+            style={{
+              border: "1px solid rgba(34,211,238,0.25)",
+              boxShadow: "0 0 30px rgba(34,211,238,0.08)",
+            }}
+            data-testid="scene-section"
+          >
+            <div className="px-2 pt-2">
+              <EditableSceneViewer id={id!} height={620} />
+            </div>
+            <div
+              className="flex items-center gap-3 px-4 py-3"
+              style={{
+                borderTop: "1px solid rgba(34,211,238,0.15)",
+                background: "rgba(8,13,26,0.95)",
+              }}
+            >
+              <span className="flex-1 text-[11px] text-slate-500">
+                场景清单（scene-manifest v1）· 点击对象选中 · 拖动坐标轴变换 · Ctrl+Z 撤销 · 保存后刷新自动恢复
+              </span>
+              <a
+                href={`/api/reconstructions/${id}/scene/glb?download=1`}
+                download={`miniverse-${id}-room.glb`}
+                className="text-[11px] text-cyan-400 hover:text-cyan-300"
+              >
+                下载 GLB
+              </a>
+            </div>
+          </section>
+        ) : task?.status === "completed" && hasMesh ? (
+          <section
+            className="overflow-hidden rounded-2xl mv-fade-in"
+            style={{
+              border: "1px solid rgba(56,189,248,0.2)",
+              boxShadow: "0 0 30px rgba(56,189,248,0.08)",
+            }}
+          >
+            <MeshViewer url={`/api/reconstructions/${id}/mesh`} height={520} orient="colmap-nerfstudio" />
+            <div
+              className="flex items-center gap-3 px-4 py-3"
+              style={{
+                borderTop: "1px solid rgba(56,189,248,0.15)",
+                background: "rgba(8,13,26,0.95)",
+              }}
+            >
+              <span className="flex-1 text-[11px] text-slate-500">
+                纹理网格（2DGS + TSDF）· 拖动旋转 / 滚轮缩放 / 右键平移
+              </span>
+              <a
+                href={`/api/reconstructions/${id}/mesh`}
+                download={`miniverse-${id}.glb`}
+                className="text-[11px] text-sky-400 hover:text-sky-300"
+              >
+                下载 GLB
+              </a>
+            </div>
+          </section>
+        ) : null}
 
         {/* 高斯查看器 */}
         {task?.status === "completed" ? (

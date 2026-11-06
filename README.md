@@ -15,6 +15,7 @@ AI 驱动的高保真真实空间 3D 重建与交互式微缩世界编辑器。
 | P2 | Python 重建流水线（预处理 → COLMAP → Splatfacto → 导出 PLY；OOM 降级重试） | ✅ **已实现并实测**：104 张真实照片完成位姿恢复+训练+导出（106MB PLY），详见 TEST_REPORT 第八节 |
 | P3 | 浏览器 Gaussian Splatting 查看器（@sparkjsdev/spark）+ 重建结果自动导入编辑器 | ✅ 已实现并实测（真实重建数据渲染通过） |
 | P4 | 场景 Schema v2（Zod 校验 / v1 迁移 / 素材白名单） | ✅ 已实现并实测 |
+| P5 | 3DGS → 带纹理三角网格（2DGS + TSDF + 纹理烘焙 → GLB） | ✅ 已实现（可选增强，任务参数 `exportMesh: true` 开启；见 [docs/MESH.md](docs/MESH.md)） |
 
 ## 快速开始（仅前端 + 编辑器，无需 GPU）
 
@@ -25,7 +26,7 @@ npm run tools:splat  # 生成演示高斯场景（真实 3DGS PLY 格式）
 npm run dev          # http://localhost:3000
 ```
 
-打开首页即自动创建演示场景并进入编辑器。`npm test` 跑 28 个单元测试。
+打开首页即自动创建演示场景并进入编辑器。`npm test` 跑 45 个单元测试（2026-11-02 实测）。
 
 ## 启用真实重建
 
@@ -40,6 +41,21 @@ cd services/reconstruction && python -m app.main check-env
 ```
 
 流水线细节：照片预处理（EXIF 校正 + 低显存降采样）→ COLMAP 特征/匹配/位姿图 → `ns-train splatfacto` → `ns-export gaussian-splat` → 产物 `scene.ply` 由 `/api/reconstructions/:id/result` 下发。OOM 自动降分辨率重试（最多 2 次），取消用 `cancel.flag` 文件协议。
+
+### 可选：3DGS → 带纹理网格（GLB）
+
+高斯是视角相关的体积表示，**无法直接**提封闭网格（`ns-export poisson/tsdf` 对 splatfacto 检查点均不可用）。本项目用 2DGS 重训 + TSDF 融合走通这条链路：
+
+```
+已收敛 scene.ply（热启动）
+  → train_2dgs（表面贴合高斯）
+  → render_depth（RGB/alpha/期望深度/法向）
+  → depth_calib（用 COLMAP 稀疏点标定深度尺度）
+  → tsdf_mesh（UniformTSDFVolume → marching cubes → 支持过滤 → 平滑减面）
+  → texture_bake（xatlas UV → 逐面选最优视角 → 逐像素深度剔除 → GLB）
+```
+
+任务 `params` 加 `"exportMesh": true` 即可，产物 `mesh.glb` 由 `/api/reconstructions/:id/mesh` 下发，任务详情页自动显示网格查看器。**失败不影响高斯交付**（错误写入 `result.mesh.error`）。原理、实测证据与已知限制见 [docs/MESH.md](docs/MESH.md)。
 
 ## 架构
 
@@ -70,7 +86,7 @@ miniverse/
 | 命令 | 说明 |
 |---|---|
 | `npm run dev` / `build` / `lint` / `typecheck` | Web 开发与验证 |
-| `npm test` | vitest（schema / 状态机 / 上传校验 / 场景存取） |
+| `npm test` | vitest（schema / 状态机 / 上传校验 / 场景存取 / 相机取景 / worker 派发 / 重建导入） |
 | `npm run tools:glb` / `tools:splat` | 重新生成素材与演示数据 |
 | `python -m app.main check-env`（services/reconstruction） | 重建环境自检 |
 | `python -m app.main worker-loop --data-dir <data>` | 手动模式 GPU Worker |

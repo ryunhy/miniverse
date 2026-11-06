@@ -1,5 +1,7 @@
 # PROGRESS — MiniVerse 2.0 通宵开发日志
 
+> **数字为历史快照，当前以实测为准（2026-11-02）**：vitest 45/45、build 17 条路由（6 页面含 `/_not-found` + 11 API）、tsc 0 错误、eslint 2 errors + 1 warning（2 errors 位于未提交的 `apps/web/src/components/mesh/MeshViewerCore.tsx`）。下方 28/28、33/33、40/40、11 路由、12 路由等均保留为当时记录，不追改；「坐标系」条目 13 的 X180° 为当时方案，已被 Rx(-90°) 取代（见 P1「坐标系修正」）。
+
 > 会话时间：2026-10-24 01:31 ~ 03:00（北京时间）。上一会话（阶段一/二单应用原型）基础上的全面升级，交接信息见文末。
 > 2026-10-24 傍晚追加：P1 体验闭环（加载进度条 + 训练相机取景 + 拍摄指引），见下方「P1 体验闭环」节；此后接原开发日志。
 
@@ -194,3 +196,24 @@ WSL2 Ubuntu 22.04.1（Add-AppxPackage 安装）+ miniconda env `miniverse`（pyt
 - 重建环境常驻：Ubuntu 内 `bash /root/train-now.sh` 模式直跑任务；或 `services/reconstruction/scripts/run-worker-wsl.sh` 常驻轮询。
 - 用户拍摄自有房间照片后：上传 → 训练 → 自动导入，流程与本轮完全一致。
 - 下一步（评审建议的第三/四步）：Grounding DINO + SAM 2 家具识别、3DGS 物体分离编辑——未开始。
+
+## 里程碑：scene-manifest v1 客户端接入 + 家具选择/移动/撤销（2026-11-05，任务 #6638）
+
+### 新增
+- `apps/web/src/lib/scene-types.ts`：清单/布局/背景检查的共享类型与 `inferObjectRole` 兜底。
+- `apps/web/src/lib/server/recon-editable-scene.ts`：清单校验、资产白名单与 sha256、布局原子写入与 409 版本冲突。
+- API：`GET/HEAD /api/reconstructions/[id]/scene`、`GET/HEAD .../scene/glb`、`GET/PUT/DELETE .../scene/edits`。
+- `apps/web/src/components/mesh/EditableSceneViewer{,Core}.tsx`：画布点选、TransformControls、隐藏、
+  撤销快照栈（50，Ctrl/Cmd+Z）、保存/刷新恢复、移除家具后的 576 视线背景检查。
+- `tools/verify-scene-manifest-client.mjs`：生产构建 + headless Chrome（CDP）交互验收。
+- `docs/SCENE-MANIFEST.md`：清单/接口/交互/验收/限制说明。
+
+### 实证（2026-11-05，`/reconstructions/sample`）
+- `selection_via=canvas`、`transform_via=gizmo`、撤销后位置精确还原且**画布像素差 0**、
+  `hide_ui_appeared=true`、保存后刷新恢复 true；证据 `docs/evidence/scene-manifest-client/`。
+- 背景检查如实上报 `newHoles=1`、`silhouetteMisses=10`（家具下方网格确有一个视线洞），未美化。
+- 四件套：vitest 12 文件 / **93 例通过**、tsc 0 错误、eslint 0 error（仅 `EditorShell.tsx` 历史未用导入警告）、next build 成功。
+
+### 修复的隐藏缺陷
+- TransformControls 松手后 R3F 的 click 会把选择抢到指针下的地板/墙体，导致「撤销后高亮换对象、像素差非 0」；
+  已用 `e.delta > 4` 过滤拖动结束的点击，并在证据中校验撤销后 `selectedId` 仍为沙发。
