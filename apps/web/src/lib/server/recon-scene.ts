@@ -13,7 +13,7 @@ import { ValidationError } from "./scene-store";
  * 重建结果 → 编辑器场景（P3 接入的"自动导入"半程）。
  * 任务完成后调用：以空场景为底座挂上高斯背景规格，房间外壳自动隐藏。
  * 校验链：任务存在 → 状态 completed → 产物 scene.ply 实际存在。
- * 本函数不落盘（持久化由 route 层 putScene 完成）；store 参数供测试注入。
+ * 本函数不落盘（持久化由 route 层 createScene 完成）；store 参数供测试注入。
  */
 
 export function createSceneFromReconstruction(

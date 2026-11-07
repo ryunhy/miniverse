@@ -2,15 +2,17 @@ import { NextResponse } from "next/server";
 import {
   deleteScene,
   getScene,
-  putScene,
+  MissingPreconditionError,
   RevisionConflictError,
+  SceneNotFoundError,
+  updateScene,
   ValidationError,
 } from "@/lib/server/scene-store";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 /** 场景读写服务端日志：id / status / 耗时 / 是否触发写回（writeback=yes 表示本次请求落了盘） */
-function logScene(op: "GET" | "PUT", id: string, status: number, startedAt: number, writeback: boolean) {
+function logScene(op: "GET" | "PUT" | "DELETE", id: string, status: number, startedAt: number, writeback: boolean) {
   console.info(
     `[scenes] ${op} id=${id} status=${status} durationMs=${Date.now() - startedAt} writeback=${writeback ? "yes" : "no"}`
   );
@@ -62,7 +64,7 @@ export async function PUT(req: Request, ctx: Ctx) {
       return NextResponse.json({ error: "sceneId 与路径不一致" }, { status: 400 });
     }
     const expectedRevision = parseExpectedRevision(body, req);
-    const saved = putScene(body, expectedRevision);
+    const saved = updateScene(body, expectedRevision);
     logScene("PUT", id, 200, startedAt, true);
     return NextResponse.json({
       scene: saved,
@@ -82,6 +84,26 @@ export async function PUT(req: Request, ctx: Ctx) {
         { status: 409 }
       );
     }
+    if (e instanceof MissingPreconditionError) {
+      logScene("PUT", id, 428, startedAt, false);
+      return NextResponse.json(
+        {
+          error: "这次保存没有携带场景版本号，为保护数据已拒绝写入。请刷新页面后重试。",
+          code: "revision_required",
+        },
+        { status: 428 }
+      );
+    }
+    if (e instanceof SceneNotFoundError) {
+      logScene("PUT", id, 404, startedAt, false);
+      return NextResponse.json(
+        {
+          error: "这个场景已经被删除，无法再保存。当前改动只保留在本机。",
+          code: "scene_not_found",
+        },
+        { status: 404 }
+      );
+    }
     if (e instanceof ValidationError) {
       logScene("PUT", id, 400, startedAt, false);
       return NextResponse.json({ error: e.message }, { status: 400 });
@@ -92,7 +114,18 @@ export async function PUT(req: Request, ctx: Ctx) {
 }
 
 export async function DELETE(_req: Request, ctx: Ctx) {
+  const startedAt = Date.now();
   const { id } = await ctx.params;
-  const ok = deleteScene(id);
-  return NextResponse.json({ deleted: ok }, { status: ok ? 200 : 404 });
+  try {
+    const ok = deleteScene(id);
+    logScene("DELETE", id, ok ? 200 : 404, startedAt, ok);
+    return NextResponse.json({ deleted: ok }, { status: ok ? 200 : 404 });
+  } catch (e) {
+    const status = e instanceof ValidationError ? 400 : 500;
+    logScene("DELETE", id, status, startedAt, false);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "删除失败" },
+      { status }
+    );
+  }
 }

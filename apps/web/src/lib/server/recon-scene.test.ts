@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSceneFromReconstruction } from "./recon-scene";
 import { TaskStore } from "./task-store";
-import { getScene, putScene } from "./scene-store";
+import { getScene, createScene } from "./scene-store";
 
 let dataDir: string;
 let store: TaskStore;
@@ -43,7 +43,7 @@ function completeTaskWithPly(taskId: string) {
 }
 
 describe("重建结果自动导入场景", () => {
-  it("已完成任务 → 生成挂载高斯背景的场景；经 putScene 后可读回", () => {
+  it("已完成任务 → 生成挂载高斯背景的场景；经 createScene 后可读回", () => {
     const taskId = randomUUID();
     completeTaskWithPly(taskId);
 
@@ -60,11 +60,31 @@ describe("重建结果自动导入场景", () => {
     expect(scene.room.visible).toBe(false); // 程序化外壳自动隐藏
     expect(scene.metadata.note).toContain("真实照片重建");
 
-    // 持久化发生在 route 层 putScene；此处验证 helper 产物可被正常落盘读回
-    // （putScene 会 touch 刷新 updatedAt，毫秒级差异属预期，比较前抹平）
-    putScene(scene);
+    // 持久化发生在 route 层 createScene；此处验证 helper 产物可被正常落盘读回
+    // （createScene 会重写 createdAt/updatedAt，比较前抹平这两个时间字段）
+    const saved = createScene(scene);
     const loaded = getScene(scene.sceneId)!;
-    expect({ ...loaded, metadata: { ...loaded.metadata, updatedAt: scene.metadata.updatedAt } }).toEqual(scene);
+    expect({
+      ...loaded,
+      metadata: {
+        ...loaded.metadata,
+        createdAt: scene.metadata.createdAt,
+        updatedAt: scene.metadata.updatedAt,
+      },
+    }).toEqual({ ...scene, metadata: { ...scene.metadata, revision: saved.metadata.revision } });
+  });
+
+  it("同一任务重复导入 → 新建一份场景，不覆盖已导入的那份", () => {
+    const taskId = randomUUID();
+    completeTaskWithPly(taskId);
+
+    const first = createScene(createSceneFromReconstruction(taskId, store));
+    const second = createScene(createSceneFromReconstruction(taskId, store));
+
+    // 每次导入生成独立 sceneId，因此不会命中「已存在」分支，也绝不会覆盖第一份
+    expect(second.sceneId).not.toBe(first.sceneId);
+    expect(getScene(first.sceneId)!.metadata.name).toBe(first.metadata.name);
+    expect(getScene(second.sceneId)!.sceneId).toBe(second.sceneId);
   });
 
   it("任务未完成 → 拒绝导入", () => {
