@@ -26,15 +26,12 @@ export function syncTaskFromWorker(taskId: string): void {
   if (!row) return;
   if (row.status === "completed" || row.status === "canceled") return;
 
+  // 进程已消失且心跳过期 → 直接判失败，不再依赖 status.json 是否还在
+  if (failIfWorkerGone(taskId, row)) return;
+
   const statusPath = path.join(taskDir(taskId), "status.json");
   if (!fs.existsSync(statusPath)) {
-    // worker 从未上报：如果进程也不在了，视为失败
-    if (row.status === "processing" && row.worker_pid) {
-      const busy = workerBusy();
-      if (!busy.busy || busy.pid !== row.worker_pid) {
-        // 进程消失且无状态文件：可能被强杀。保留 processing 但记录警告（避免误判短暂的启动间隙）
-      }
-    }
+    // worker 从未上报：进程还活着或仍在启动窗口内，继续等
     return;
   }
 
@@ -62,6 +59,46 @@ export function syncTaskFromWorker(taskId: string): void {
   } catch {
     // 状态流转冲突（并发同步）忽略，下次读取再试
   }
+}
+
+/** worker 超过该时长没有任何状态上报，且进程已消失 → 判定为异常退出 */
+const STALE_MS = 10 * 60 * 1000;
+
+/** 最近一次心跳：status.json 优先，回退 input.json（worker 启动后尚未上报时） */
+function lastHeartbeatMs(taskId: string): number | null {
+  let latest = 0;
+  for (const name of ["status.json", "input.json"]) {
+    try {
+      latest = Math.max(latest, fs.statSync(path.join(taskDir(taskId), name)).mtimeMs);
+    } catch {
+      // 文件不存在
+    }
+  }
+  return latest > 0 ? latest : null;
+}
+
+/**
+ * 卡死判定（读取时懒同步，不引入常驻后台任务）：
+ * 任务仍是 processing，但记录的 worker 进程已不在，且心跳超过 10 分钟没更新，
+ * 说明 worker 被强杀 / 崩溃后没来得及上报，按 failed 收敛。
+ *
+ * 训练阶段可能长时间不写 status.json（一次 15 分钟以上），所以进程存活时一律不判失败。
+ */
+function failIfWorkerGone(taskId: string, row: { status: string; worker_pid: number | null }): boolean {
+  if (row.status !== "processing") return false;
+  if (row.worker_pid) {
+    const busy = workerBusy();
+    if (busy.busy && busy.pid === row.worker_pid) return false;
+  }
+  const beat = lastHeartbeatMs(taskId);
+  if (beat === null || Date.now() - beat < STALE_MS) return false;
+  try {
+    getTaskStore().transition(taskId, "failed", { error: "worker 异常退出" });
+  } catch {
+    return false; // 并发同步已流转，忽略
+  }
+  releaseWorkerLockIfIdle();
+  return true;
 }
 
 function releaseWorkerLockIfIdle(): void {
