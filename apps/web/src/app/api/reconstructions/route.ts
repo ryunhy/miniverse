@@ -20,7 +20,8 @@ export async function GET() {
 /**
  * 创建重建任务：multipart/form-data
  * photos: File[]（3~120 张，JPG/PNG/WebP，单张 ≤15MB）
- * params: 可选 JSON 字符串 { maxResolution?: number, steps?: number }
+ * params: 可选 JSON 字符串 { maxResolution?: number, steps?: number, exportMesh?: boolean }
+ *   exportMesh=true 时 worker 会在高斯导出后追加网格导出（2DGS + 纹理烘焙）。
  */
 export async function POST(req: Request) {
   try {
@@ -33,6 +34,14 @@ export async function POST(req: Request) {
         params = JSON.parse(rawParams);
       } catch {
         return NextResponse.json({ error: "params 不是合法 JSON" }, { status: 400 });
+      }
+      // 落盘前校验：params 会原样写进 data/tasks/<id>/input.json 并下发给 worker，
+      // 类型错了 worker 侧只会按默认值静默忽略，用户看不到原因。
+      if (params === null || typeof params !== "object" || Array.isArray(params)) {
+        return NextResponse.json({ error: "params 必须是 JSON 对象" }, { status: 400 });
+      }
+      if (params.exportMesh !== undefined && typeof params.exportMesh !== "boolean") {
+        return NextResponse.json({ error: "params.exportMesh 必须是布尔值" }, { status: 400 });
       }
     }
 

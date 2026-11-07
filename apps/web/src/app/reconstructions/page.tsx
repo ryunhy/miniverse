@@ -37,6 +37,8 @@ export default function ReconstructionsPage() {
   const [messageType, setMessageType] = useState<"success" | "error" | "info">("info");
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  // 网格是可选增强产物：默认关，开启后 worker 多跑一次训练 + 纹理烘焙
+  const [exportMesh, setExportMesh] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const previewUrls = useRef<string[]>([]);
 
@@ -78,7 +80,7 @@ export default function ReconstructionsPage() {
     setProgress(0);
     setMessage(null);
     try {
-      const result = await uploadPhotos(files, {}, setProgress);
+      const result = await uploadPhotos(files, { exportMesh }, setProgress);
       setMessage(
         result.workerStarted
           ? "任务已创建，重建开始！"
@@ -225,6 +227,34 @@ export default function ReconstructionsPage() {
           >
             选择照片
           </button>
+
+          {/* 网格导出开关（可选增强）：默认关，开启会显著拉长任务耗时 */}
+          <label
+            className="mx-auto mt-4 flex max-w-md cursor-pointer items-start gap-2.5 rounded-xl px-3 py-2.5 text-left"
+            style={{
+              background: exportMesh ? "rgba(56,189,248,0.1)" : "rgba(15,23,42,0.5)",
+              border: `1px solid ${exportMesh ? "rgba(56,189,248,0.35)" : "rgba(139,92,246,0.15)"}`,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={exportMesh}
+              onChange={(e) => setExportMesh(e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-sky-500"
+            />
+            <span className="text-[11px] leading-5">
+              <span className="font-semibold" style={{ color: "#7dd3fc" }}>
+                同时导出网格
+              </span>
+              <span className="ml-1.5 rounded px-1 py-0.5 text-[9px] text-slate-400" style={{ background: "rgba(148,163,184,0.12)" }}>
+                默认关闭
+              </span>
+              <span className="block text-slate-400">
+                额外产出带贴图的三维模型，可在任务详情页下载。会多花约 15~25 分钟（8GB 显卡实测约 16 分钟），
+                期间要再跑一次训练，显存占用与主重建相近。
+              </span>
+            </span>
+          </label>
 
           {/* 已选文件预览 */}
           {files.length > 0 && (
