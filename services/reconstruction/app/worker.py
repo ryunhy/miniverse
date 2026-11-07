@@ -90,6 +90,9 @@ class TaskContext:
 
 def run_task(task_id: str, data_dir: Path) -> int:
     ctx = TaskContext(task_id, data_dir)
+    # 仅重试网格：复用上次重建的高斯产物，不重跑 COLMAP / 训练
+    if bool(ctx.params.get("meshOnly", False)):
+        return run_mesh_only(ctx)
     log.info("MiniVerse worker 启动：task=%s", task_id)
     log.info("Python %s @ %s", platform.python_version(), platform.platform())
     ctx.report("processing", stage="init", progress=0.01)
@@ -243,6 +246,56 @@ def _export_mesh_stage(ctx: TaskContext, run_dir: Path, ply: Path) -> dict:
     except Exception as e:  # noqa: BLE001 - 增强项失败不阻断主交付
         log.exception("网格导出失败（高斯产物不受影响）")
         return {"error": f"{type(e).__name__}: {e}", "seconds": round(time.time() - t0, 1)}
+
+
+def run_mesh_only(ctx: TaskContext) -> int:
+    """只补跑网格导出：复用已完成任务的训练产物，不重跑 COLMAP / 高斯训练。
+
+    与整条链路分开上报：结果写 data/tasks/<id>/mesh-status.json，
+    不触碰主任务的 status.json（主任务已完成，不能把状态机回退到 processing）。
+    """
+    log.info("MiniVerse worker 启动（仅网格重试）：task=%s", ctx.task_id)
+
+    def report(status: str, error: str | None = None, result: dict | None = None) -> None:
+        payload: dict = {
+            "status": status,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if error:
+            payload["error"] = error
+        if result:
+            payload["result"] = result
+        tmp = ctx.task_dir / "mesh-status.json.tmp"
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(ctx.task_dir / "mesh-status.json")
+
+    try:
+        # 不走 ctx.check_cancel()：它会写主任务 status.json，把已完成的任务改成 canceled
+        if (ctx.task_dir / "cancel.flag").exists():
+            report("canceled")
+            return 0
+
+        configs = sorted((ctx.work_dir / "nerfstudio").rglob("config.yml"))
+        if not configs:
+            report("failed", "找不到上次重建留下的训练文件，只能重跑整个重建任务")
+            return 1
+        ply = ctx.export_dir / "scene.ply"
+        if not ply.exists():
+            report("failed", "找不到上次重建的高斯点云，只能重跑整个重建任务")
+            return 1
+
+        report("processing")
+        out = _export_mesh_stage(ctx, configs[0].parent, ply)
+        if out.get("error"):
+            report("failed", str(out["error"]), out)
+            return 1
+        report("completed", result=out)
+        log.info("网格重试完成：task=%s", ctx.task_id)
+        return 0
+    except Exception as e:  # noqa: BLE001 - 单独重试也要如实上报，不静默
+        report("failed", f"{type(e).__name__}: {e}")
+        log.exception("网格重试失败：task=%s", ctx.task_id)
+        return 1
 
 
 def check_env() -> int:

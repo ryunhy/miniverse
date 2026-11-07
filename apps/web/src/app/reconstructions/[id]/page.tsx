@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Loader2, CheckCircle2, XCircle, Clock, AlertTriangle, ArrowRight } from "lucide-react";
+import { Loader2, CheckCircle2, XCircle, Clock, AlertTriangle, ArrowRight, RefreshCw } from "lucide-react";
 import { api, type TaskRow, type TaskEvent } from "@/lib/api";
 import SplatViewer from "@/components/splat/SplatViewer";
 import MeshViewer from "@/components/mesh/MeshViewer";
@@ -57,6 +57,16 @@ function NavHeader({ id }: { id: string | null }) {
   );
 }
 
+/** 把 worker 的原始报错翻成用户能看懂的话（术语只在「技术细节」里展开） */
+function meshErrorText(raw: string): string {
+  if (/TSDF|faces=\d+/i.test(raw)) return "重建出的表面太少，可能是拍摄角度或光线不足，建议补拍后再试。";
+  if (/CUDA|显存|out of memory/i.test(raw)) return "显卡显存不足，先关掉其他占用显卡的程序再试。";
+  if (/config\.yml|训练文件/.test(raw)) return "找不到上次重建留下的训练文件，只能重跑整个重建任务。";
+  if (/scene\.ply|点云/.test(raw)) return "找不到上次重建的高斯点云，只能重跑整个重建任务。";
+  if (/ModuleNotFoundError|No module named/.test(raw)) return "重建环境缺少组件，请先跑一次环境自检。";
+  return "生成过程中出错，可以点「仅重试网格」再试一次。";
+}
+
 /** 任务详情：状态、事件、日志、完成后的高斯查看 */
 export default function TaskDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [id, setId] = useState<string | null>(null);
@@ -66,8 +76,10 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  // 网格是可选增强产物：探测一次 /mesh 是否存在，决定是否展示网格查看器
-  const [hasMesh, setHasMesh] = useState(false);
+  // 网格是可选增强产物：状态与失败原因统一由服务端判定，不再靠 HEAD 探测猜
+  const [mesh, setMesh] = useState<{ state: "ready" | "running" | "failed" | "missing" | "absent"; error: string | null } | null>(null);
+  const [meshRetrying, setMeshRetrying] = useState(false);
+  const [meshRetryError, setMeshRetryError] = useState<string | null>(null);
   // 场景清单（scene-manifest v1）优先：存在时可选中/变换/撤销并保存布局
   const [sceneAvailable, setSceneAvailable] = useState(false);
   const router = useRouter();
@@ -98,17 +110,43 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     };
   }, [id]);
 
-  // 任务完成后探测一次网格产物（404 = 未开启 exportMesh 或生成失败，静默回退到高斯）
+  // 网格状态：产物是否存在、是否正在单独重试、失败原因是什么，都由服务端判定
   useEffect(() => {
-    if (!id || task?.status !== "completed") return;
+    if (!id) return;
     let alive = true;
-    fetch(`/api/reconstructions/${id}/mesh`, { method: "HEAD" })
-      .then((r) => alive && setHasMesh(r.ok))
-      .catch(() => alive && setHasMesh(false));
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/reconstructions/${id}/mesh/status`, { cache: "no-store" });
+        if (!r.ok) return;
+        const body = (await r.json()) as { state: "ready" | "running" | "failed" | "missing" | "absent"; error: string | null };
+        if (alive) setMesh(body);
+      } catch {
+        // 网络抖动保留上次结果
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 3000);
     return () => {
       alive = false;
+      clearInterval(iv);
     };
-  }, [id, task?.status]);
+  }, [id]);
+
+  const retryMesh = async () => {
+    if (!id) return;
+    setMeshRetrying(true);
+    setMeshRetryError(null);
+    try {
+      const r = await fetch(`/api/reconstructions/${id}/mesh/retry`, { method: "POST" });
+      const body = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(body.error || "网格重试启动失败");
+      setMesh((m) => (m ? { ...m, state: "running", error: null } : m));
+    } catch (e) {
+      setMeshRetryError(e instanceof Error ? e.message : "网格重试启动失败");
+    } finally {
+      setMeshRetrying(false);
+    }
+  };
 
   // 场景清单探测：不依赖任务记录（交付的独立场景也要能在真实客户端打开）
   useEffect(() => {
@@ -269,7 +307,7 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
               </a>
             </div>
           </section>
-        ) : task?.status === "completed" && hasMesh ? (
+        ) : task?.status === "completed" && mesh?.state === "ready" ? (
           <section
             className="overflow-hidden rounded-2xl mv-fade-in"
             style={{
@@ -286,7 +324,7 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
               }}
             >
               <span className="flex-1 text-[11px] text-slate-500">
-                纹理网格（2DGS + TSDF）· 拖动旋转 / 滚轮缩放 / 右键平移
+                纹理网格 · 拖动旋转 / 滚轮缩放 / 右键平移
               </span>
               <a
                 href={`/api/reconstructions/${id}/mesh`}
@@ -298,6 +336,68 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
             </div>
           </section>
         ) : null}
+
+        {/* 网格状态：未就绪时说清原因，并支持只重试网格（不重跑整个重建） */}
+        {task?.status === "completed" && mesh && mesh.state !== "ready" && (
+          <section
+            className="mt-4 rounded-2xl px-5 py-4 mv-fade-in"
+            style={{
+              background: "rgba(10,15,30,0.7)",
+              border: `1px solid ${mesh.state === "failed" ? "rgba(248,113,113,0.25)" : "rgba(148,163,184,0.18)"}`,
+            }}
+          >
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 shrink-0">
+                {mesh.state === "running" ? (
+                  <Loader2 size={18} className="animate-spin" style={{ color: "#818cf8" }} />
+                ) : mesh.state === "failed" ? (
+                  <XCircle size={18} style={{ color: "#f87171" }} />
+                ) : (
+                  <AlertTriangle size={18} style={{ color: "#94a3b8" }} />
+                )}
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-slate-100">
+                  {mesh.state === "running" ? "正在重新生成网格…"
+                    : mesh.state === "failed" ? "网格生成失败"
+                    : mesh.state === "missing" ? "网格尚未生成"
+                    : "未导出网格"}
+                </p>
+                <p className="mt-1 text-[11px] leading-5 text-slate-400">
+                  {mesh.state === "running"
+                    ? "复用上次重建的模型，只重跑网格这一段，不影响已有的高斯结果。"
+                    : mesh.state === "failed"
+                      ? meshErrorText(mesh.error ?? "")
+                      : mesh.state === "missing"
+                        ? "任务已开启网格导出，但还没有产物。可以只重试网格。"
+                        : "创建任务时没有勾选「同时导出网格」，本次只有高斯结果。需要网格请重新创建任务并勾选该选项。"}
+                </p>
+                {mesh.state === "failed" && mesh.error && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-[10px] text-slate-600">技术细节</summary>
+                    <pre
+                      className="mt-1 max-h-24 overflow-auto text-[10px] leading-4 text-slate-600"
+                      style={{ whiteSpace: "pre-wrap" }}
+                    >
+                      {mesh.error}
+                    </pre>
+                  </details>
+                )}
+                {meshRetryError && <p className="mt-1.5 text-[11px] text-red-400">{meshRetryError}</p>}
+                {(mesh.state === "failed" || mesh.state === "missing") && (
+                  <button
+                    onClick={retryMesh}
+                    disabled={meshRetrying}
+                    className="btn-ghost mt-2.5 flex items-center gap-1.5"
+                  >
+                    {meshRetrying ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                    {meshRetrying ? "启动中…" : "仅重试网格"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* 高斯查看器 */}
         {task?.status === "completed" ? (
