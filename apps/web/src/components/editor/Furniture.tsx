@@ -52,6 +52,9 @@ function PlaceholderBox({ size, color }: { size: [number, number, number]; color
   );
 }
 
+/** 未知资产只警告一次，避免每帧渲染刷屏 */
+const warnedUnknownAssets = new Set<string>();
+
 export default function Furniture({
   obj,
   selected,
@@ -62,11 +65,17 @@ export default function Furniture({
   onTransform,
 }: FurnitureProps) {
   const asset = getAsset(obj.assetId);
-  if (!asset) return null;
+  if (!asset && !warnedUnknownAssets.has(obj.assetId)) {
+    warnedUnknownAssets.add(obj.assetId);
+    console.warn(
+      `[editor] 未知素材 assetId="${obj.assetId}"（不在 asset-catalog 白名单内），已用占位方块显示。`
+    );
+  }
 
   const colorOverride = obj.materialOverrides.color;
-  const baseColor = colorOverride ?? asset.defaultColor;
-  const placeholderSize: [number, number, number] = [asset.footprint[0], 0.6, asset.footprint[1]];
+  const baseColor = colorOverride ?? asset?.defaultColor ?? "#9ca3af";
+  const footprint: [number, number] = asset?.footprint ?? [0.4, 0.4];
+  const placeholderSize: [number, number, number] = [footprint[0], asset ? 0.6 : 0.4, footprint[1]];
 
   const content = (
     <group
@@ -84,13 +93,13 @@ export default function Furniture({
       }
     >
       <Suspense fallback={<PlaceholderBox size={placeholderSize} color={baseColor} />}>
-        {asset.glbPath ? (
+        {asset?.glbPath ? (
           <GlbModel url={asset.glbPath} colorOverride={colorOverride} />
         ) : (
           <PlaceholderBox size={placeholderSize} color={baseColor} />
         )}
       </Suspense>
-      {selected && <SelectionRing footprint={asset.footprint} />}
+      {selected && <SelectionRing footprint={footprint} />}
     </group>
   );
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getAsset } from "./asset-catalog";
 
 /**
  * MiniVerse 场景数据结构 v2（P4）
@@ -27,7 +28,17 @@ export const materialOverridesSchema = z.object({
 
 export const sceneObjectSchema = z.object({
   id: z.string().min(1),
-  assetId: z.string().min(1),
+  /**
+   * 素材 ID：必须命中 asset-catalog.ts 白名单。
+   * 只做"非空字符串"会让未知 ID 落盘并在前端静默不渲染（画面比数据少东西），
+   * 也让未来任何按 assetId 拼路径的实现变成穿越入口。
+   */
+  assetId: z
+    .string()
+    .min(1)
+    .refine((id) => getAsset(id) !== undefined, {
+      message: "未知素材：assetId 必须来自素材白名单（asset-catalog.ts）",
+    }),
   label: z.string().max(50).optional(),
   /** 底部中心点，米 */
   position: vec3Schema,
@@ -65,8 +76,18 @@ export const reconstructionSchema = z.object({
   taskId: z.string().nullable().default(null),
   status: reconstructionStatusSchema.default("none"),
   format: z.enum(["none", "gaussian-splat"]).default("none"),
-  /** 高斯数据访问地址（同源 API 路径或 /demo 静态路径） */
-  url: z.string().nullable().default(null),
+  /**
+   * 高斯数据访问地址：只允许同源路径（/api/ 或 /demo/ 开头）。
+   * 含 "://" 的外部地址一律拒绝，避免浏览器向第三方发起请求、离线白屏，
+   * 也防止场景 JSON 被当作外链注入载体。
+   */
+  url: z
+    .string()
+    .nullable()
+    .default(null)
+    .refine((v) => v === null || /^\/(api|demo)\//.test(v), {
+      message: "重建数据地址必须是同源的 /api/ 或 /demo/ 路径，禁止外部 URL",
+    }),
   /** true = 演示/程序生成数据，必须在 UI 上明确标注，禁止冒充真实重建 */
   synthetic: z.boolean().default(false),
   /**

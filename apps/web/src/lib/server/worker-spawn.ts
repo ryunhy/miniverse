@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { dataDir, repoRoot, taskDir } from "./paths";
+import { dataDir, repoRoot, taskDir, uploadDir } from "./paths";
 import { getTaskStore } from "./task-store";
 
 /**
@@ -203,7 +203,8 @@ export function spawnReconstructionWorker(taskId: string, params: Record<string,
 
   // 下发输入
   const inputPath = path.join(dir, "input.json");
-  const photoDir = path.join(repoRoot(), "data", "uploads", taskId);
+  // 必须与上传落盘目录同源：自定义 MINIVERSE_DATA_DIR 时 repoRoot()/data 会与 uploads 分叉
+  const photoDir = uploadDir(taskId);
   fs.writeFileSync(
     inputPath,
     JSON.stringify({ task_id: taskId, photo_dir: photoDir, params, repo_root: repoRoot() }, null, 2),

@@ -130,7 +130,10 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
    * 让用户三选一；其他失败退回本地缓存并保留 dirty 状态。
    */
   const saveToServer = useCallback(
-    async (target: SceneData, expectedRevision?: number): Promise<"ok" | "conflict" | "failed"> => {
+    async (
+      target: SceneData,
+      expectedRevision?: number
+    ): Promise<"ok" | "conflict" | "failed" | "gone"> => {
       try {
         const res = await api.saveScene(
           target,
@@ -150,11 +153,18 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           });
           return "conflict";
         }
+        if (e instanceof ApiError && e.status === 404) {
+          // 场景已在别处被删除：不再重试，避免每次编辑都打空请求
+          markSaved("local");
+          setAutosaveHold(true);
+          flash("这个场景已在别处被删除，当前改动只保留在本机，无法再同步到服务端。");
+          return "gone";
+        }
         markSaved("local");
         return "failed";
       }
     },
-    [markSaved]
+    [markSaved, flash]
   );
 
   // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据；
@@ -187,6 +197,8 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
       flash("已用本地副本覆盖服务端");
     } else if (result === "failed") {
       flash("覆盖失败：服务端仍不可用");
+    } else if (result === "gone") {
+      flash("覆盖失败：这个场景已被删除，本地内容已保留在本机");
     }
   }, [saveToServer, flash]);
 
@@ -212,6 +224,8 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
       flash("已用本地内容覆盖服务端");
     } else if (result === "failed") {
       flash("覆盖失败：服务端不可用，本地内容已保留");
+    } else if (result === "gone") {
+      flash("覆盖失败：这个场景已被删除，本地内容已保留在本机");
     }
     // result=conflict：服务端在此期间又变了，saveToServer 会更新基准并保持弹窗
   }, [conflict, saveToServer, flash]);
