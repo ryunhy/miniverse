@@ -26,13 +26,17 @@ class ViewStore:
         return self.views[i]
 
     def key(self, i: int) -> str:
-        return self.views[i]["name"].replace(".jpg", "")
+        # 用 stem 而非 replace(".jpg","")：数据集常见大写 .JPG，硬编码小写会拼出
+        # view-XXX.JPG.npz（实际落盘是 view-XXX.npz），直接 FileNotFoundError。
+        return Path(self.views[i]["name"]).stem
 
     def _load(self, i: int, field: str) -> np.ndarray:
         k = (field, i)
         if k not in self._cache:
-            z = np.load(self.dir / f"view-{self.key(i)}.npz")
-            self._cache[k] = z[field]
+            if len(self._cache) >= 24:
+                self._cache.pop(next(iter(self._cache)))
+            with np.load(self.dir / f"view-{self.key(i)}.npz") as z:
+                self._cache[k] = z[field]
         return self._cache[k]
 
     def depth(self, i: int) -> np.ndarray:

@@ -61,6 +61,8 @@ def render_view(g: dict, cam, sh_degree: int = 3) -> dict:
 
 def render_all(config_path: Path, ckpt_path: Path, out: Path, split: str = "all",
                limit: int = 0, log=print) -> dict:
+    from PIL import Image
+
     bootstrap()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -76,12 +78,17 @@ def render_all(config_path: Path, ckpt_path: Path, out: Path, split: str = "all"
     t0 = time.time()
     for i, cam in enumerate(cams):
         r = render_view(g, cam)
+        with Image.open(cam.path) as photo:
+            if photo.size != (cam.width, cam.height):
+                raise ValueError(f"照片与相机尺寸不一致：{cam.path} {photo.size} != {(cam.width, cam.height)}")
+            rgb = np.asarray(photo.convert("RGB"))
         stem = Path(cam.name).stem
         np.savez_compressed(out / f"view-{stem}.npz",
-                            depth=r["depth"], alpha=r["alpha"], rgb=r["rgb"],
+                            depth=r["depth"], alpha=r["alpha"], rgb=rgb,
                             normal=r["normal"].astype(np.float16))
         meta.append({
             "index": i, "name": cam.name, "split": cam.split,
+            "rgb_source": "photograph", "image_path": cam.path,
             "width": cam.width, "height": cam.height,
             "K": cam.K.tolist(), "c2w_gl": cam.c2w_gl.tolist(),
             "distortion": cam.distortion,

@@ -47,10 +47,17 @@ def run_colmap(work_dir: Path, image_dir: Path, use_gpu: bool = True, matcher: s
     sparse_dir = work_dir / "sparse"
     sparse_dir.mkdir(parents=True, exist_ok=True)
 
-    # 产物缓存：位姿已恢复则直接复用（训练参数可反复重试，不必重跑 COLMAP）
+    # 产物缓存：位姿已恢复则直接复用（训练参数可反复重试，不必重跑 COLMAP）。
+    # 前提：preprocess 已按输入指纹判定输入未变（变更时会清空 sparse/database）。
     cached = sparse_dir / "0"
     if (cached / "images.bin").exists():
-        log.info("COLMAP 产物已存在，跳过重建：%s", cached)
+        if not (work_dir / "input_fingerprint.json").exists():
+            log.warning(
+                "复用 COLMAP 产物，但缺少输入指纹（历史任务）：无法证明当前照片与旧位姿一致。"
+                "若已更换照片，请先删除该任务的 sparse/database 再重跑。"
+            )
+        else:
+            log.info("COLMAP 产物已存在，跳过重建（输入指纹一致）：%s", cached)
         return cached
 
     gpu = "1" if use_gpu else "0"

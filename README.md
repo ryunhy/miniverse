@@ -19,14 +19,16 @@ AI 驱动的高保真真实空间 3D 重建与交互式微缩世界编辑器。
 
 ## 快速开始（仅前端 + 编辑器，无需 GPU）
 
+本发布副本使用 Node.js 24 和 npm 11 验证。上传照片、任务数据库、GPU 模型和重建产物均保存在协作者自己的运行环境中。
+
 ```bash
-npm install          # monorepo 根目录
+npm ci               # 在仓库根目录按锁文件安装依赖
 npm run tools:glb    # 生成 14 个程序化家具 GLB
 npm run tools:splat  # 生成演示高斯场景（真实 3DGS PLY 格式）
 npm run dev          # http://localhost:3000
 ```
 
-打开首页即自动创建演示场景并进入编辑器。`npm test` 跑 45 个单元测试（2026-11-02 实测）。
+打开首页即自动创建演示场景并进入编辑器。使用 `npm test` 运行当前版本的自动化测试。
 
 ## 启用真实重建
 
@@ -56,6 +58,10 @@ cd services/reconstruction && python -m app.main check-env
 ```
 
 任务 `params` 加 `"exportMesh": true` 即可，产物 `mesh.glb` 由 `/api/reconstructions/:id/mesh` 下发，任务详情页自动显示网格查看器。**失败不影响高斯交付**（错误写入 `result.mesh.error`）。原理、实测证据与已知限制见 [docs/MESH.md](docs/MESH.md)。
+
+## 微缩场景试验功能
+
+在 Web 的「微缩场景」入口可以上传照片并查看重建阶段。处理环境、依赖和已知限制见 [微缩重建运行手册](docs/miniature/RUNBOOK.md)。
 
 ## 架构
 

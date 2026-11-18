@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import depth_calib, render_depth, texture_bake, train_2dgs, tsdf_mesh
+from .tsdf_options import resolve_tsdf_options
 
 
 @dataclass
@@ -55,13 +56,19 @@ def find_sparse_dir(config_path: Path, max_up: int = 6) -> Path | None:
 def export_mesh(config_path: Path, export_dir: Path, work_dir: Path,
                 iters: int = 15000, tex_size: int = 4096, voxel: float = 0.015,
                 target_faces: int = 250000, init_ply: Path | None = None,
-                keep_views: bool = False, log=print) -> MeshResult:
+                keep_views: bool = False, log=print,
+                extraction: str = "occupancy", bbox_percentile: float = 0.5) -> MeshResult:
     """跑完整网格链路。产物写入 export_dir：mesh.glb / mesh.ply / mesh-texture.png。
 
     config_path : nerfstudio 训练产物 config.yml（相机与坐标系来源）
     export_dir  : 最终产物目录（与 scene.ply 同级）
     work_dir    : 中间产物目录（ckpt / views / TSDF）
+    extraction  : TSDF 提取方式，"occupancy"（旧行为，默认）| "sdf"
+    bbox_percentile : 场景边界离群裁剪比例，0–0.5（默认 0.5，即旧行为）
+
+    非法参数直接抛 ValueError：不做静默回退，避免"以为换了算法其实没换"。
     """
+    extraction, bbox_percentile = resolve_tsdf_options(extraction, bbox_percentile)
     t0 = time.time()
     export_dir = Path(export_dir)
     work_dir = Path(work_dir)
@@ -125,9 +132,14 @@ def export_mesh(config_path: Path, export_dir: Path, work_dir: Path,
     t = time.time()
     log("[mesh] 4/5 TSDF 融合")
     mesh_ply_work = mesh_work / "mesh-tsdf.ply"
+    # 提取方式与边界裁剪由调用方显式传入（任务 params 的 meshExtraction /
+    # meshBboxPercentile）；默认 occupancy + 0.5 保持旧行为，历史重试不受影响。
+    # 新参数（sdf + 0.1）的对照证据见 outputs/2026-11-11/algorithm-optimization。
     tsdf_stats = tsdf_mesh.build_tsdf(views, mesh_ply_work, voxel=voxel,
                                       target_faces=target_faces,
-                                      depth_fit=(fit_a, fit_b), log=log)
+                                      depth_fit=(fit_a, fit_b), log=log,
+                                      extraction=extraction,
+                                      bbox_percentile=bbox_percentile)
     stats["tsdf"] = tsdf_stats
     stats["tsdf_seconds"] = round(time.time() - t, 1)
 

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getTaskStore } from "@/lib/server/task-store";
-import { cancelWorker, releaseWorkerLock } from "@/lib/server/worker-spawn";
+import { cancelWorker, releaseWorkerLockIfOwned } from "@/lib/server/worker-spawn";
 import { isCancelRequested } from "@/lib/server/status-sync";
 
 
@@ -15,7 +15,8 @@ export async function POST(_req: Request, ctx: Ctx) {
     cancelWorker(id, task.worker_pid);
     if (task.status === "pending") {
       store.transition(id, "canceled");
-      releaseWorkerLock();
+      // 只释放属于自己的锁：排队任务的锁通常属于另一个正在运行的任务
+      releaseWorkerLockIfOwned(task.worker_pid);
     } else if (task.status === "processing") {
       // worker 会检测 cancel.flag 并写 status.json=canceled；Web 端下次读取时同步
       store.appendEvent(id, "warn", "已请求取消，等待 worker 退出");

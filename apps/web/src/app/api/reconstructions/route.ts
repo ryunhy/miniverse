@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getTaskStore } from "@/lib/server/task-store";
 import { validateAndSavePhotos, UploadError } from "@/lib/server/uploads";
-import { spawnReconstructionWorker } from "@/lib/server/worker-spawn";
+import { spawnReconstructionWorker, workerBusy } from "@/lib/server/worker-spawn";
 import { syncTaskFromWorker } from "@/lib/server/status-sync";
 
 
@@ -14,7 +14,9 @@ export async function GET() {
       syncTaskFromWorker(task.id);
     }
   }
-  return NextResponse.json({ tasks: store.list() });
+  const busy = workerBusy();
+  // 附带 worker 占用情况：排队卡住时前端要能说清「前面还有任务」还是「Worker 没起来」
+  return NextResponse.json({ tasks: store.list(), worker: { busy: busy.busy, pid: busy.pid ?? null } });
 }
 
 /**

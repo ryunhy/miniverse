@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Undo2,
   Redo2,
@@ -25,6 +27,8 @@ import {
   Cpu,
   ChevronLeft,
   History,
+  RefreshCw,
+  MoreHorizontal,
 } from "lucide-react";
 import SceneCanvas from "./SceneCanvas";
 import LeftPanel from "./LeftPanel";
@@ -36,6 +40,80 @@ import type { SceneData } from "@shared/scene-schema";
 
 interface EditorShellProps {
   sceneId: string;
+}
+
+/**
+ * 保存反馈的持续状态（不是一次性 toast）：
+ * - saving：正在写服务端
+ * - saved：已写入，保留时间戳直到下一次改动
+ * - failed：写入失败，改动已留在本机，可点重试
+ * - paused：自动保存被挂起（版本冲突未决 / 场景已被删除），需用户处理后可重试
+ */
+type SaveState =
+  | { status: "idle" }
+  | { status: "saving" }
+  | { status: "saved"; at: number }
+  | { status: "failed"; message: string }
+  | { status: "paused"; message: string };
+
+/**
+ * 保存状态胶囊：header 与窄屏浮层共用。
+ * header 在窄屏是横向滚动容器，状态胶囊会被挤出可视区，
+ * 所以窄屏额外在视口右上角常驻一份（.mv-save-float 控制显隐）。
+ */
+function SaveStateChip({
+  state,
+  onRetry,
+  className = "",
+}: {
+  state: SaveState;
+  onRetry: () => void;
+  className?: string;
+}) {
+  if (state.status === "idle") return null;
+  const tone =
+    state.status === "saved"
+      ? { background: "rgba(6,26,22,0.92)", color: "#34d399", border: "1px solid rgba(52,211,153,0.4)" }
+      : state.status === "saving"
+        ? { background: "rgba(6,22,30,0.92)", color: "#67e8f9", border: "1px solid rgba(34,211,238,0.4)" }
+        : state.status === "failed"
+          ? { background: "rgba(32,10,14,0.94)", color: "#f87171", border: "1px solid rgba(248,113,113,0.45)" }
+          : { background: "rgba(32,23,6,0.94)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.45)" };
+  return (
+    <span
+      className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] backdrop-blur-sm ${className}`}
+      style={tone}
+      title={state.status === "failed" || state.status === "paused" ? state.message : undefined}
+    >
+      {state.status === "saving" && (
+        <>
+          <Loader2 size={10} className="animate-spin" />
+          保存中…
+        </>
+      )}
+      {state.status === "saved" && (
+        <>
+          <CheckCircle2 size={10} />
+          已保存{" "}
+          <span className="tabular-nums">
+            {new Date(state.at).toLocaleTimeString("zh-CN", { hour12: false })}
+          </span>
+        </>
+      )}
+      {(state.status === "failed" || state.status === "paused") && (
+        <>
+          {state.status === "failed" ? <WifiOff size={10} /> : <HardDrive size={10} />}
+          {state.message}
+          <button
+            className="ml-0.5 flex items-center gap-0.5 rounded px-1 py-0.5 underline underline-offset-2 transition hover:bg-white/10"
+            onClick={onRetry}
+          >
+            <RefreshCw size={9} /> 重试
+          </button>
+        </>
+      )}
+    </span>
+  );
 }
 
 export default function EditorShell({ sceneId }: EditorShellProps) {
@@ -54,9 +132,32 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [restoring, setRestoring] = useState<number | null>(null);
   const [health, setHealth] = useState<{ python: string | null; workerBusy: boolean; taskCount: number } | null>(null);
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  /** 持续可见的保存状态（toast 只作补充） */
+  const [saveState, setSaveState] = useState<SaveState>({ status: "idle" });
+  // 窄屏没有横向空间同时放两侧面板：默认折叠，保证 3D 视口占满宽度且可交互
+  const [leftCollapsed, setLeftCollapsed] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 900,
+  );
+  const [rightCollapsed, setRightCollapsed] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 900,
+  );
+
+  // 窗口被拖窄时同样收起两侧面板（只自动收起、不自动展开，用户手动打开后不会被抢走）
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth <= 900) {
+        setLeftCollapsed(true);
+        setRightCollapsed(true);
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+  /** 场景不存在时的补救入口：真的新建一个场景，而不是跳回首页打开另一个已有场景 */
+  const [creatingScene, setCreatingScene] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const scene = useEditorStore((s) => s.scene);
   const selectedId = useEditorStore((s) => s.selectedId);
@@ -134,6 +235,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
       target: SceneData,
       expectedRevision?: number
     ): Promise<"ok" | "conflict" | "failed" | "gone"> => {
+      setSaveState({ status: "saving" });
       try {
         const res = await api.saveScene(
           target,
@@ -141,6 +243,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
         );
         markSaved("server", res.revision);
         setAutosaveHold(false);
+        setSaveState({ status: "saved", at: Date.now() });
         return "ok";
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
@@ -151,23 +254,37 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
             server: serverScene,
             serverRevision: payload?.revision ?? serverScene?.metadata.revision ?? 0,
           });
+          setSaveState({ status: "paused", message: "等你处理版本冲突" });
           return "conflict";
         }
         if (e instanceof ApiError && e.status === 404) {
           // 场景已在别处被删除：不再重试，避免每次编辑都打空请求
           markSaved("local");
           setAutosaveHold(true);
+          setSaveState({ status: "paused", message: "场景已被删除，改动只在本机" });
           flash("这个场景已在别处被删除，当前改动只保留在本机，无法再同步到服务端。");
           return "gone";
         }
         markSaved("local");
+        setSaveState({ status: "failed", message: "没能写入服务端，改动已留在本机" });
         return "failed";
       }
     },
     [markSaved, flash]
   );
 
-  // 自动保存（防抖 800ms）。loadSource=local 时直接跳过：旧镜像可能早于服务端数据；
+  /** 失败/挂起后的手动重试：用当前最新内容再写一次，不重传照片、不重置场景 */
+  const retrySave = useCallback(async () => {
+    const current = useEditorStore.getState().scene;
+    if (!current) return;
+    mirrorToLocal();
+    const result = await saveToServer(current);
+    if (result === "ok") flash("已保存到服务端");
+    else if (result === "failed") flash("服务端仍不可用，改动保留在本机");
+  }, [saveToServer, mirrorToLocal, flash]);
+
+  // 自动保存（防抖 1200ms）：同一串连续改动（含输入框逐字修改、连续两次拖动）只写一次。
+  // loadSource=local 时直接跳过：旧镜像可能早于服务端数据；
   // 内容与服务端一致（dirty=false）也跳过，避免加载后盲写覆盖这半秒内别处的改动。
   // 冲突弹窗未决或用户取消后挂起时同样跳过：编辑器仍可继续改，只是不写、不再弹第二个窗。
   useEffect(() => {
@@ -182,7 +299,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     const t = setTimeout(async () => {
       mirrorToLocal();
       await saveToServer(scene);
-    }, 800);
+    }, 1200);
     return () => clearTimeout(t);
   }, [scene, sceneDirty, ready, sceneId, loadSource, mirrorToLocal, saveToServer, conflict, autosaveHold]);
 
@@ -340,6 +457,71 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
     }
   };
 
+  /** 重置为演示场景：二次确认后清空并自动写回服务端 */
+  const handleReset = () => {
+    if (loadSource === "local") return;
+    if (!window.confirm("确定重置为演示场景？当前场景的全部家具与重建背景都会被清空，并替换为内置演示场景，改动将在 1.2 秒后自动写入服务端。")) return;
+    pushHistory();
+    resetToDemo();
+  };
+
+  /** 打开导入文件选择器：ref 只在事件回调里读，不在渲染期访问 */
+  const openImportPicker = useCallback(() => fileInputRef.current?.click(), []);
+
+  /** 窄屏折叠进「更多」的次级操作：桌面态与折叠菜单共用同一份定义，避免两处行为漂移 */
+  const secondaryActions: {
+    key: string;
+    label: string;
+    icon: typeof CloudUpload;
+    title: string;
+    href?: string;
+    onClick?: () => void;
+    disabled?: boolean;
+    style?: CSSProperties;
+  }[] = [
+    {
+      key: "recon",
+      label: "照片重建",
+      icon: CloudUpload,
+      title: "上传照片创建重建任务",
+      href: "/reconstructions",
+      style: { color: "#67e8f9", borderColor: "rgba(34,211,238,0.2)" },
+    },
+    {
+      key: "history",
+      label: "历史版本",
+      icon: History,
+      title: "查看该场景的历史版本并恢复",
+      onClick: () => (historyOpen ? setHistoryOpen(false) : void openHistory()),
+      style: historyOpen ? { color: "#c4b5fd", borderColor: "rgba(139,92,246,0.35)" } : undefined,
+    },
+    { key: "export", label: "导出", icon: Download, title: "导出当前场景 JSON", onClick: handleExport },
+    { key: "import", label: "导入", icon: Upload, title: "导入场景 JSON" },
+    {
+      key: "reset",
+      label: "重置",
+      icon: RotateCcw,
+      title: loadSource === "local" ? "只读模式：请用本地副本覆盖服务端" : "重置为演示场景",
+      onClick: handleReset,
+      disabled: loadSource === "local",
+      style: { color: "#fbbf24", borderColor: "rgba(245,158,11,0.2)" },
+    },
+  ];
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  const createNewScene = useCallback(async () => {
+    if (creatingScene) return;
+    setCreatingScene(true);
+    setCreateError(null);
+    try {
+      const { scene: created } = await api.createScene("demo");
+      router.push(`/editor/${created.sceneId}`);
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : "新建场景失败");
+      setCreatingScene(false);
+    }
+  }, [creatingScene, router]);
+
   if (loadError) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4 bg-[#030712] text-slate-300">
@@ -352,21 +534,33 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           }}
         >
           <p className="text-sm text-red-400">{loadError}</p>
-          <Link href="/" className="btn-accent">
-            返回首页新建场景
-          </Link>
+          {createError && <p className="text-[11px] text-red-400">{createError}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              className="btn-accent disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void createNewScene()}
+              disabled={creatingScene}
+            >
+              {creatingScene ? "正在新建…" : "新建一个场景"}
+            </button>
+            <Link href="/reconstructions" className="btn-ghost">
+              返回任务列表
+            </Link>
+          </div>
         </div>
       </div>
     );
   }
 
   const isGaussian = scene?.reconstruction.format === "gaussian-splat" && !!scene.reconstruction.url;
+  /** 视角预设依赖高斯包围帧：点云未就绪前禁用，避免点了没反应 */
+  const splatReady = !isGaussian || splatLoad === "ready";
 
   return (
     <div className="flex h-screen flex-col" style={{ background: "#030712" }}>
       {/* ── 顶部栏 ── */}
       <header
-        className="relative flex items-center gap-2 px-3 py-0 shrink-0"
+        className="mv-topbar relative flex items-center gap-2 px-3 py-0 shrink-0"
         style={{
           height: "var(--topbar-height, 44px)",
           background: "rgba(8,13,26,0.95)",
@@ -514,6 +708,12 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
                 <button
                   key={preset}
                   onClick={() => requestView(preset)}
+                  disabled={!splatReady}
+                  title={
+                    splatReady
+                      ? `${label}视角`
+                      : "高斯背景还在加载，加载完成后即可使用"
+                  }
                   style={
                     active
                       ? {
@@ -528,7 +728,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
                           borderRight: "1px solid rgba(8,145,178,0.15)",
                         }
                   }
-                  className="px-2.5 py-1.5 text-[10px] font-medium transition-all duration-150 hover:text-cyan-300"
+                  className="px-2.5 py-1.5 text-[10px] font-medium transition-all duration-150 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:text-inherit"
                 >
                   {label}
                 </button>
@@ -560,7 +760,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
           <Link
             href="/reconstructions"
-            className="btn-ghost"
+            className="btn-ghost mv-topbar-secondary"
             style={{ color: "#67e8f9", borderColor: "rgba(34,211,238,0.2)" }}
           >
             <CloudUpload size={12} /> 照片重建
@@ -568,53 +768,98 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
           <button
             className="btn-ghost"
-            disabled={loadSource === "local" || conflict !== null}
+            disabled={loadSource === "local" || conflict !== null || saveState.status === "saving"}
             title={
               conflict
                 ? "请先处理右下角的保存冲突"
                 : loadSource === "local"
                   ? "只读模式：请用本地副本覆盖服务端"
-                  : "保存到服务端"
+                  : "立即保存到服务端"
             }
-            onClick={async () => {
-              if (!scene) return;
-              mirrorToLocal();
-              const result = await saveToServer(scene);
-              if (result === "ok") flash("已保存到服务端");
-              else if (result === "failed") flash("服务端不可用，已写入本地缓存");
-            }}
+            onClick={() => void retrySave()}
           >
-            <Save size={12} /> 保存
+            {saveState.status === "saving" ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Save size={12} />
+            )}{" "}
+            保存
           </button>
-          <button
-            className="btn-ghost"
-            onClick={() => (historyOpen ? setHistoryOpen(false) : void openHistory())}
-            title="查看该场景的历史版本并恢复"
-            style={historyOpen ? { color: "#c4b5fd", borderColor: "rgba(168,85,247,0.35)" } : {}}
-          >
-            <History size={12} /> 历史版本
-          </button>
-          <button className="btn-ghost" onClick={handleExport}>
-            <Download size={12} /> 导出
-          </button>
-          <button className="btn-ghost" onClick={() => fileInputRef.current?.click()}>
-            <Upload size={12} /> 导入
-          </button>
-          <button
-            className="btn-ghost"
-            disabled={loadSource === "local"}
-            title={loadSource === "local" ? "只读模式：请用本地副本覆盖服务端" : "重置为演示场景"}
-            style={{ color: "#fbbf24", borderColor: "rgba(245,158,11,0.2)" }}
-            onClick={() => {
-              if (loadSource === "local") return;
-              // 会清空全部家具与重建背景并自动写回服务端，必须二次确认
-              if (!window.confirm("确定重置为演示场景？当前场景的全部家具与重建背景都会被清空，并替换为内置演示场景，改动将在 0.8 秒后自动写入服务端。")) return;
-              pushHistory();
-              resetToDemo();
-            }}
-          >
-            <RotateCcw size={12} /> 重置
-          </button>
+          {/* 次级操作：宽屏平铺，≤1100px 折叠进「更多」，避免 820px 时按钮被裁到屏幕外 */}
+          <div className="mv-topbar-secondary flex items-center gap-1.5">
+            {secondaryActions
+              .filter((a) => a.key !== "recon")
+              .map((a) => {
+                const Icon = a.icon;
+                return (
+                  <button
+                    key={a.key}
+                    className="btn-ghost"
+                    disabled={a.disabled}
+                    title={a.title}
+                    style={a.style}
+                    onClick={a.key === "import" ? openImportPicker : a.onClick}
+                  >
+                    <Icon size={12} /> {a.label}
+                  </button>
+                );
+              })}
+          </div>
+
+          <div className="mv-topbar-more relative">
+            <button
+              className="btn-ghost"
+              title="更多操作"
+              onClick={() => setMoreOpen((v) => !v)}
+              style={moreOpen ? { color: "#c4b5fd", borderColor: "rgba(168,85,247,0.35)" } : {}}
+            >
+              <MoreHorizontal size={12} /> 更多
+            </button>
+            {moreOpen && (
+              <div
+                className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col gap-1 rounded-lg p-1.5"
+                style={{
+                  background: "rgba(8,13,26,0.98)",
+                  border: "1px solid rgba(139,92,246,0.25)",
+                  boxShadow: "0 12px 30px rgba(0,0,0,0.5)",
+                }}
+              >
+                {secondaryActions.map((a) => {
+                  const Icon = a.icon;
+                  const inner = (
+                    <>
+                      <Icon size={12} /> {a.label}
+                    </>
+                  );
+                  return a.href ? (
+                    <Link
+                      key={a.key}
+                      href={a.href}
+                      className="btn-ghost justify-start"
+                      title={a.title}
+                      onClick={() => setMoreOpen(false)}
+                    >
+                      {inner}
+                    </Link>
+                  ) : (
+                    <button
+                      key={a.key}
+                      className="btn-ghost justify-start"
+                      disabled={a.disabled}
+                      title={a.title}
+                      onClick={() => {
+                        setMoreOpen(false);
+                        if (a.key === "import") openImportPicker();
+                        else a.onClick?.();
+                      }}
+                    >
+                      {inner}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <input
             ref={fileInputRef}
             type="file"
@@ -729,6 +974,13 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
         <main className="relative min-w-0 flex-1" style={{ background: "#030712" }}>
           {ready && <SceneCanvas />}
 
+          {/* 保存状态常驻在视口右上角：不挤占 header（窄屏 header 会横向滚动），任何宽度都可见 */}
+          <SaveStateChip
+            state={saveState}
+            onRetry={() => void retrySave()}
+            className="absolute right-2 top-2 z-30"
+          />
+
           {/* 高斯背景状态条 */}
           {isGaussian && (
             <div
@@ -823,7 +1075,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
       {/* ── 底部状态栏 ── */}
       <footer
-        className="flex items-center gap-4 px-3 shrink-0"
+        className="mv-statusbar flex items-center gap-4 px-3 shrink-0"
         style={{
           height: "var(--statusbar-height, 26px)",
           background: "rgba(8,13,26,0.95)",
@@ -856,10 +1108,15 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
             <>
               <span
                 className="h-1.5 w-1.5 rounded-full"
-                style={{ background: "#fbbf24", boxShadow: "0 0 4px rgba(251,191,36,0.7)" }}
+                style={{
+                  background: saveState.status === "failed" ? "#f87171" : "#fbbf24",
+                  boxShadow: `0 0 4px ${saveState.status === "failed" ? "rgba(248,113,113,0.7)" : "rgba(251,191,36,0.7)"}`,
+                }}
               />
-              <HardDrive size={10} style={{ color: "#fbbf24" }} />
-              <span style={{ color: "#fbbf24" }}>本地缓存</span>
+              <HardDrive size={10} style={{ color: saveState.status === "failed" ? "#f87171" : "#fbbf24" }} />
+              <span style={{ color: saveState.status === "failed" ? "#f87171" : "#fbbf24" }}>
+                {saveState.status === "failed" ? "保存失败（改动在本机）" : "本地缓存"}
+              </span>
             </>
           ) : (
             <>
@@ -882,18 +1139,26 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
           <span style={{ color: "#22d3ee" }}>高斯背景{scene.reconstruction.synthetic ? "（演示）" : ""}</span>
         )}
 
-        {/* 右侧：GPU 状态 */}
+        {/* 右侧：重建环境状态。只如实报告实际检查项（health 仅探测 Python 解释器），
+            不把「找到 python」说成「GPU 就绪」；悬停给出实际检测范围。 */}
         <span className="ml-auto flex items-center gap-3">
-          <span className="flex items-center gap-1.5">
+          <span
+            className="flex items-center gap-1.5"
+            title={
+              health?.python
+                ? `实际检测项：Python 3 解释器（${health.python}）。GPU、CUDA 与训练依赖未检测，不代表重建一定能跑。`
+                : "实际检测项：未找到可用的 Python 3 解释器（python / py -3）。重建任务无法在本机启动。"
+            }
+          >
             {health?.python ? (
               <>
                 <Cpu size={9} style={{ color: "#34d399" }} />
-                <span style={{ color: "#34d399" }}>GPU 就绪</span>
+                <span style={{ color: "#34d399" }}>重建环境：Python 可用</span>
               </>
             ) : (
               <>
                 <WifiOff size={9} style={{ color: "#f59e0b" }} />
-                <span style={{ color: "#f59e0b" }}>演示模式</span>
+                <span style={{ color: "#f59e0b" }}>重建环境：未配置</span>
               </>
             )}
           </span>
@@ -914,7 +1179,7 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
 
       {/* 历史版本面板：只读列表，恢复走 CAS 追加为新版本（不改写历史） */}
       {historyOpen && (
-        <div className="fixed right-4 top-14 z-40 flex max-h-[60vh] w-[26rem] flex-col rounded-lg border border-slate-700 bg-slate-900 shadow-2xl">
+        <div className="mv-history fixed right-4 top-14 z-40 flex max-h-[60vh] w-[26rem] flex-col rounded-lg border border-slate-700 bg-slate-900 shadow-2xl">
           <div className="flex items-center gap-2 border-b border-slate-700/60 px-4 py-2.5">
             <History size={13} style={{ color: "#c4b5fd" }} />
             <span className="text-xs font-semibold text-slate-200">历史版本</span>
@@ -977,35 +1242,44 @@ export default function EditorShell({ sceneId }: EditorShellProps) {
         </div>
       )}
 
-      {/* 409 版本冲突：非模态浮层，三选项，绝不静默失败；处理前仍可继续编辑（自动保存已暂停） */}
+      {/* 保存冲突：非模态浮层，三选项，绝不静默失败；处理前仍可继续编辑（自动保存已暂停） */}
       {conflict && (
-        <div className="fixed bottom-4 right-4 z-50 w-[24rem] rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-2xl">
+        <div className="mv-conflict fixed bottom-4 right-4 z-50 w-[24rem] rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-2xl">
           <div className="mb-2 text-sm font-semibold" style={{ color: "#fbbf24" }}>
-            保存冲突：服务端已被其他会话修改
+            这个场景刚被别处改过
           </div>
           <div className="mb-4 text-xs leading-relaxed text-slate-400">
-            本地记录的版本号与服务端当前版本（revision {conflict.serverRevision}）不一致，
-            为避免覆盖别人的改动，<span style={{ color: "#f87171" }}>本次未写入服务端</span>。
-            处理前仍可继续编辑，自动保存已暂停。请选择处理方式：
+            你打开之后，另一个窗口或设备保存了这个场景。为了不把对方的改动冲掉，
+            <span style={{ color: "#f87171" }}>你刚才的修改还没有存进去</span>。
+            你仍然可以继续编辑，只是自动保存暂时停住了。请选一种处理方式：
           </div>
           <div className="flex flex-col gap-2">
             <button
-              className="rounded border border-sky-500/40 px-3 py-2 text-left text-xs text-sky-300 transition hover:bg-sky-500/10"
+              className="rounded border border-sky-500/40 px-3 py-2 text-left transition hover:bg-sky-500/10"
               onClick={resolveConflictUseServer}
             >
-              用服务端版本覆盖本地（丢弃我的改动）
+              <span className="block text-xs text-sky-300">用对方的版本（我的改动会消失）</span>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-slate-400">
+                页面会切换成对方保存的样子；你这边现在的改动全部丢弃，且无法撤销。
+              </span>
             </button>
             <button
-              className="rounded border border-amber-500/40 px-3 py-2 text-left text-xs text-amber-300 transition hover:bg-amber-500/10"
+              className="rounded border border-amber-500/40 px-3 py-2 text-left transition hover:bg-amber-500/10"
               onClick={resolveConflictUseMine}
             >
-              用我的内容覆盖服务端（写入当前最新内容，以服务端最新版本号为基线）
+              <span className="block text-xs text-amber-300">保留我的版本（对方刚存的改动会被替换）</span>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-slate-400">
+                服务端会存成你现在的画面；对方刚保存的内容被覆盖，对方不会收到提醒。
+              </span>
             </button>
             <button
-              className="rounded border border-slate-600 px-3 py-2 text-left text-xs text-slate-400 transition hover:bg-slate-700/30"
+              className="rounded border border-slate-600 px-3 py-2 text-left transition hover:bg-slate-700/30"
               onClick={resolveConflictCancel}
             >
-              取消（不写服务端，保留本地内容并暂停自动保存）
+              <span className="block text-xs text-slate-300">先不处理，继续编辑</span>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-slate-400">
+                你的改动留在当前页面，自动保存保持暂停；之后可以再点「保存」重新决定，关掉页面则可能丢失。
+              </span>
             </button>
           </div>
         </div>

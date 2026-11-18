@@ -142,12 +142,36 @@ def test_distortion_order() -> None:
         check("裸 6 元应被 OpenCV 拒绝", True)
 
 
+def test_view_key() -> None:
+    """ViewStore 的 key 必须与 render_depth 落盘名一致，且与扩展名大小写无关。"""
+    print("[6] ViewStore key 扩展名大小写")
+    import json
+    import tempfile
+
+    from app.mesh.visibility import ViewStore
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "views-meta.json").write_text(json.dumps({"views": [
+            {"name": "DSCF5566.JPG"},
+            {"name": "IMG_0001.jpg"},
+            {"name": "scan.PNG"},
+        ]}), encoding="utf-8")
+        (d / "view-DSCF5566.npz").write_bytes(b"")
+        vs = ViewStore(Path(td))
+        check("大写 .JPG → DSCF5566", vs.key(0) == "DSCF5566", vs.key(0))
+        check("小写 .jpg → IMG_0001", vs.key(1) == "IMG_0001", vs.key(1))
+        check("大写 .PNG → scan", vs.key(2) == "scan", vs.key(2))
+        check("npz 路径可命中", (d / f"view-{vs.key(0)}.npz").exists())
+
+
 def main() -> int:
     test_ply_roundtrip()
     test_glb_roundtrip()
     test_robust_fit()
     test_camera_convention()
     test_distortion_order()
+    test_view_key()
     print()
     if FAILURES:
         print(f"失败 {len(FAILURES)} 项：{FAILURES}")

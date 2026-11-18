@@ -138,13 +138,12 @@ export default function LeftPanel() {
                     border: `1px solid ${a.defaultColor}44`,
                   }}
                 >
-                  {/* 颜色圆点 */}
-                  <span
-                    className="h-4 w-4 rounded-full"
-                    style={{
-                      background: a.defaultColor,
-                      boxShadow: `0 0 10px ${a.defaultColor}88`,
-                    }}
+                  {/* 缩略图位：程序化 GLB 无贴图预览，用线性图标 + 分类色占位，
+                      尺寸文字在下方，避免只剩一个几像素的小圆点 */}
+                  <Box
+                    size={22}
+                    strokeWidth={1.5}
+                    style={{ color: a.defaultColor, opacity: 0.85, filter: `drop-shadow(0 0 6px ${a.defaultColor}55)` }}
                   />
                   {/* 扫描线动画 */}
                   <span

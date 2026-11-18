@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as Spark from "@sparkjsdev/spark";
 import { installRenderFallback } from "@/lib/render-fallback";
 import { fetchSplatBytes, createSplatMesh, ORIENT_COLMAP_NERFSTUDIO_Q, trainingViewpoint } from "@/lib/splat-load";
+import { CAMERA_EVENT, publishCamera, reportCameraState, fallbackViewpoint, type ViewerCameraDetail, type ViewerControls } from "@/lib/viewer-sync";
 
 interface SplatViewerCoreProps {
   url: string;
@@ -15,6 +16,8 @@ interface SplatViewerCoreProps {
   orient?: "identity" | "colmap-nerfstudio";
   /** 关联重建任务 ID：提供时加载完成后按训练相机取景（真实拍摄视角） */
   taskId?: string | null;
+  /** 视角同步开关（与网格查看器共用，默认开） */
+  syncEnabled?: boolean;
 }
 
 /** 加载进度：download 百分比（Content-Length 未知时 null）/ parse 阶段 */
@@ -27,10 +30,10 @@ export interface ViewerProgress {
  * 独立 Gaussian Splatting 查看器核心（P3）——由 SplatViewer.tsx 以 dynamic(ssr:false) 挂载。
  * - 加载 .ply（3DGS 格式，COLMAP+Splatfacto 导出）/ .spz
  * - 手动流式 fetch 上报下载进度（spark url 直载无进度回调）
- * - 提供 taskId 时按训练相机取景，否则用高斯稳健取景
+ * - 提供 taskId 时按训练相机取景，否则用与网格查看器共用的默认机位
  * - 与编辑器同一 three/R3F 坐标系约定（米、Y 向上）
  */
-export default function SplatViewerCore({ url, height = 520, orient = "identity", taskId }: SplatViewerCoreProps) {
+export default function SplatViewerCore({ url, height = 520, orient = "identity", taskId, syncEnabled = true }: SplatViewerCoreProps) {
   const [progress, setProgress] = useState<ViewerProgress | null>({ phase: "download", percent: null });
   // react-use-measure 的 ResizeObserver 在部分水合/导航时序下不派发初始回调，
   // R3F canvas 会停留 300×150 且渲染循环不启动；挂载后手动 poke 一次 resize（已实证有效）
@@ -52,9 +55,12 @@ export default function SplatViewerCore({ url, height = 520, orient = "identity"
         <color attach="background" args={["#111418"]} />
         <ambientLight intensity={0.9} />
         <directionalLight position={[5, 10, 5]} intensity={1.5} />
-        <SplatScene url={url} orient={orient} taskId={taskId} onProgress={setProgress} />
+        <SplatScene url={url} orient={orient} taskId={taskId} syncEnabled={syncEnabled} onProgress={setProgress} />
         <OrbitControlsRef target={[0, 1, 0]} />
       </Canvas>
+      <div className="pointer-events-none absolute left-3 top-3 rounded-full bg-slate-950/70 px-2.5 py-1 text-[10px] text-slate-400">
+        人眼视角 · 地面网格 1 m/格
+      </div>
       {progress && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-slate-950/70 text-xs text-slate-300">
           {progress.phase === "download" && progress.percent !== null ? (
@@ -83,25 +89,31 @@ let disposeFallback: (() => void) | null = null;
 
 /** makeDefault OrbitControls：target 交由取景逻辑动态设置（初始 [0,1,0]） */
 function OrbitControlsRef({ target }: { target: [number, number, number] }) {
-  return <OrbitControls makeDefault target={target} minDistance={0.2} maxDistance={50} />;
+  return <OrbitControls makeDefault target={target} minDistance={0.4} maxDistance={50} />;
 }
 
 function SplatScene({
   url,
   orient,
   taskId,
+  syncEnabled,
   onProgress,
 }: {
   url: string;
   orient: "identity" | "colmap-nerfstudio";
   taskId?: string | null;
+  syncEnabled: boolean;
   onProgress: (p: ViewerProgress | null) => void;
 }) {
   const [failed, setFailed] = useState(false);
   const gl = useThree((s) => s.gl);
   const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as { target?: THREE.Vector3; update?: () => void } | null;
+  const controls = useThree((s) => s.controls) as unknown as ViewerControls | null;
   const [instances, setInstances] = useState<{ splat: Spark.SplatMesh; spark: Spark.SparkRenderer } | null>(null);
+  /** 地面网格位置：取景时按点云的中心与地面分位放，避免网格飘在半空 */
+  const [grid, setGrid] = useState({ x: 0, y: 0, z: 0 });
+  const [framed, setFramed] = useState(false);
+  const lastRemote = useRef<ViewerCameraDetail | null>(null);
 
   // 实例在 effect 内创建：StrictMode 双挂载下 useMemo 实例会被首次 cleanup dispose（黑屏根因）
   useEffect(() => {
@@ -131,6 +143,8 @@ function SplatScene({
     };
   }, []);
 
+  // R3F 相机是命令式外部对象：取景与同步必须直接改 position/target，走 React 状态会丢帧。
+  /* eslint-disable react-hooks/immutability */
   useEffect(() => {
     let disposed = false;
     const abort = new AbortController();
@@ -172,50 +186,62 @@ function SplatScene({
           splats: splat.packedSplats?.numSplats ?? null,
         };
 
-        // 取景：训练相机优先（真实拍摄视角），失败回退高斯稳健取景
+        // 取景：训练相机优先（真实拍摄视角），失败时用与网格查看器同一套默认机位
         const cam = camera as THREE.PerspectiveCamera;
         const orientQ = splat.quaternion;
         const vp = taskId ? await trainingViewpoint(taskId, orientQ, abort.signal) : null;
         if (disposed) return;
-        if (vp) {
-          cam.up.set(0, 1, 0);
-          cam.position.copy(vp.position);
-          if (controls?.target) {
-            controls.target.copy(vp.target);
-            controls.update?.();
-          }
-        } else {
-          const N = splat.packedSplats?.numSplats ?? 0;
-          if (N > 0) {
-            const xs: number[] = [];
-            const ys: number[] = [];
-            const zs: number[] = [];
-            const step = Math.max(1, Math.floor(N / 6000));
-            const v = new THREE.Vector3();
-            splat.forEachSplat((index, center) => {
-              if (index % step === 0) {
-                v.copy(center);
-                xs.push(v.x);
-                ys.push(v.y);
-                zs.push(v.z);
-              }
-            });
-            const median = (arr: number[]) => {
-              const a = [...arr].sort((p, q) => p - q);
-              return a[Math.floor(a.length / 2)] ?? 0;
-            };
-            const center = new THREE.Vector3(median(xs), median(ys), median(zs)).applyQuaternion(orientQ);
-            const dists = xs.map((x, i) => Math.hypot(x - center.x, ys[i] - center.y, zs[i] - center.z));
-            const radius = Math.max(median(dists) * 4, 1.5);
-            const dir = new THREE.Vector3(0.75, 0.5, 1).normalize();
-            cam.up.set(0, 1, 0);
-            cam.position.copy(center.clone().add(dir.multiplyScalar(radius * 2.2)));
-            if (controls?.target) {
-              controls.target.copy(center);
-              controls.update?.();
-            }
-          }
+
+        // 点云先按朝向旋转到世界坐标，再统计中心与地面高度
+        const N = splat.packedSplats?.numSplats ?? 0;
+        const center = new THREE.Vector3();
+        let floorY = 0;
+        if (N > 0) {
+          const step = Math.max(1, Math.floor(N / 6000));
+          const xs: number[] = [];
+          const ys: number[] = [];
+          const zs: number[] = [];
+          const v = new THREE.Vector3();
+          splat.forEachSplat((index, splatCenter) => {
+            if (index % step !== 0) return;
+            v.copy(splatCenter).applyQuaternion(orientQ);
+            xs.push(v.x);
+            ys.push(v.y);
+            zs.push(v.z);
+          });
+          const sorted = (arr: number[]) => [...arr].sort((p, q) => p - q);
+          const at = (arr: number[], ratio: number) => arr[Math.floor(arr.length * ratio)] ?? 0;
+          const sx = sorted(xs);
+          const sy = sorted(ys);
+          const sz = sorted(zs);
+          floorY = at(sy, 0.02);
+          center.set(at(sx, 0.5), at(sy, 0.5), at(sz, 0.5));
         }
+
+        cam.up.set(0, 1, 0);
+        let targetPoint: THREE.Vector3;
+        if (vp) {
+          targetPoint = vp.target;
+          cam.position.copy(vp.position);
+        } else {
+          const fb = fallbackViewpoint(center, floorY);
+          targetPoint = fb.target;
+          cam.position.copy(fb.position);
+        }
+        if (controls?.target) controls.target.copy(targetPoint);
+        cam.near = 0.05;
+        cam.far = Math.max(200, cam.position.distanceTo(center) * 50);
+        cam.updateProjectionMatrix();
+        controls?.update?.();
+        setGrid({ x: center.x, y: floorY + 0.002, z: center.z });
+        setFramed(true);
+        reportCameraState("splat", cam, targetPoint);
+        publishCamera({
+          source: "splat",
+          position: cam.position.toArray(),
+          target: targetPoint.toArray(),
+          distance: cam.position.distanceTo(targetPoint),
+        });
 
         onProgress(null);
         setInstances({ splat, spark });
@@ -236,25 +262,104 @@ function SplatScene({
     };
   }, [gl, url, orient, taskId, onProgress, camera, controls]);
 
+  // 记录本查看器实际生效的机位（与同步开关无关：关掉同步只是停止联动，不影响本地拖动）
+  useEffect(() => {
+    if (!framed || !controls?.addEventListener) return;
+    let raf = 0;
+    const report = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        reportCameraState("splat", camera, controls.target);
+      });
+    };
+    controls.addEventListener("change", report);
+    report();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      controls.removeEventListener?.("change", report);
+    };
+  }, [framed, camera, controls]);
+
+  // 拖动本查看器 → 广播机位（跳过刚被远端套用的那一帧，避免来回打架）
+  useEffect(() => {
+    if (!syncEnabled || !framed || !controls?.addEventListener) return;
+    let raf = 0;
+    const publish = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const target = controls.target;
+        const lr = lastRemote.current;
+        if (
+          lr &&
+          camera.position.distanceTo(new THREE.Vector3(...lr.position)) < 1e-3 &&
+          target.distanceTo(new THREE.Vector3(...lr.target)) < 1e-3
+        ) {
+          return;
+        }
+        publishCamera({
+          source: "splat",
+          position: camera.position.toArray(),
+          target: target.toArray(),
+          distance: camera.position.distanceTo(target),
+        });
+      });
+    };
+    controls.addEventListener("change", publish);
+    publish();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      controls.removeEventListener?.("change", publish);
+    };
+  }, [framed, syncEnabled, camera, controls]);
+
+  // 接收另一侧机位
+  useEffect(() => {
+    if (!syncEnabled) return;
+    const onRemote = (e: Event) => {
+      const detail = (e as CustomEvent<ViewerCameraDetail>).detail;
+      if (!detail || detail.source === "splat") return;
+      lastRemote.current = detail;
+      camera.position.set(...detail.position);
+      if (controls?.target) {
+        controls.target.set(...detail.target);
+        controls.update?.();
+      }
+      reportCameraState("splat", camera, controls?.target ?? new THREE.Vector3(...detail.target));
+    };
+    window.addEventListener(CAMERA_EVENT, onRemote);
+    return () => window.removeEventListener(CAMERA_EVENT, onRemote);
+  }, [syncEnabled, camera, controls]);
+  /* eslint-enable react-hooks/immutability */
+
   if (failed) {
     return (
-      <mesh position={[0, 1.5, 0]}>
-        <boxGeometry args={[0.5, 0.5, 0.5]} />
-        <meshStandardMaterial color="#ef4444" wireframe />
-      </mesh>
+      <>
+        {/* 1 米网格：给用户空间尺度参照，避免把正常几何当成碎数据 */}
+        <gridHelper args={[12, 12, "#2b3d57", "#1b2534"]} position={[grid.x, grid.y, grid.z]} />
+        <mesh position={[0, 1.5, 0]}>
+          <boxGeometry args={[0.5, 0.5, 0.5]} />
+          <meshStandardMaterial color="#ef4444" wireframe />
+        </mesh>
+      </>
     );
   }
   if (!instances) {
     return (
-      <mesh position={[0, 1.5, 0]}>
-        <sphereGeometry args={[0.3, 16, 16]} />
-        <meshStandardMaterial color="#22d3ee" />
-      </mesh>
+      <>
+        <gridHelper args={[12, 12, "#2b3d57", "#1b2534"]} position={[grid.x, grid.y, grid.z]} />
+        <mesh position={[0, 1.5, 0]}>
+          <sphereGeometry args={[0.3, 16, 16]} />
+          <meshStandardMaterial color="#22d3ee" />
+        </mesh>
+      </>
     );
   }
 
   return (
     <>
+      <gridHelper args={[12, 12, "#2b3d57", "#1b2534"]} position={[grid.x, grid.y, grid.z]} />
       <primitive object={instances.spark} />
       <primitive object={instances.splat} />
     </>

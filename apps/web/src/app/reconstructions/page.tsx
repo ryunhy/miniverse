@@ -29,6 +29,23 @@ const STATUS_ICON: Record<TaskRow["status"], React.ReactNode> = {
   canceled: <Square size={10} />,
 };
 
+/** 创建重建任务的最少照片数：与 submit 的前置校验同一口径，按钮也据此禁用 */
+const MIN_PHOTOS = 3;
+
+/** 排队超过该时长就认为可能卡住：给出原因和可操作出口，而不是继续沉默等待 */
+const PENDING_STUCK_MS = 10 * 60 * 1000;
+
+function pendingWaitMinutes(t: TaskRow, now: number): number {
+  return now ? Math.max(0, Math.floor((now - new Date(t.created_at).getTime()) / 60000)) : 0;
+}
+
+/** 排队原因只有两种可信来源：worker 锁是否被占用、本任务是否记录过 worker 进程 */
+function pendingReason(t: TaskRow, worker: { busy: boolean; pid: number | null }): string {
+  if (worker.busy) return `已有重建任务在运行（PID ${worker.pid ?? "未知"}），本任务在等它结束`;
+  if (t.worker_pid) return "上次启动的 Worker 已退出，且没有上报状态";
+  return "Worker 尚未启动，重建环境可能未就绪";
+}
+
 export default function ReconstructionsPage() {
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
@@ -36,6 +53,9 @@ export default function ReconstructionsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [messageType, setMessageType] = useState<"success" | "error" | "info">("info");
   const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [worker, setWorker] = useState<{ busy: boolean; pid: number | null }>({ busy: false, pid: null });
+  /** 轮询时顺带更新，避免在渲染期调用 Date.now（React 纯度规则） */
+  const [now, setNow] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   // 网格是可选增强产物：默认关，开启后 worker 多跑一次训练 + 纹理烘焙
   const [exportMesh, setExportMesh] = useState(false);
@@ -44,8 +64,10 @@ export default function ReconstructionsPage() {
 
   const refreshTasks = useCallback(async () => {
     try {
-      const { tasks } = await api.listTasks();
+      const { tasks, worker } = await api.listTasks();
       setTasks(tasks);
+      setWorker(worker);
+      setNow(Date.now());
     } catch {
       // 服务端不可用时静默
     }
@@ -72,8 +94,8 @@ export default function ReconstructionsPage() {
   };
 
   const submit = async () => {
-    if (files.length < 3) {
-      setMessage("至少需要 3 张照片（推荐 30~80 张环绕拍摄）");
+    if (files.length < MIN_PHOTOS) {
+      setMessage(`至少需要 ${MIN_PHOTOS} 张照片（推荐 30~80 张环绕拍摄）`);
       setMessageType("error");
       return;
     }
@@ -83,8 +105,8 @@ export default function ReconstructionsPage() {
       const result = await uploadPhotos(files, { exportMesh }, setProgress);
       setMessage(
         result.workerStarted
-          ? "任务已创建，重建开始！"
-          : `任务已创建，但 Worker 未能启动：${result.workerError ?? "未知原因"}（可安装环境后点重试）`
+          ? "任务已创建，已派发给重建环境，等待 Worker 开始处理…"
+          : `任务已创建，但 Worker 未能启动：${result.workerError ?? "未知原因"}（可在任务列表点「重新尝试」）`
       );
       setMessageType(result.workerStarted ? "success" : "error");
       setFiles([]);
@@ -306,11 +328,16 @@ export default function ReconstructionsPage() {
 
               <button
                 onClick={submit}
-                disabled={progress !== null}
-                className="btn-gold mt-4"
+                disabled={progress !== null || files.length < MIN_PHOTOS}
+                title={files.length < MIN_PHOTOS ? `至少需要 ${MIN_PHOTOS} 张不同角度的照片` : undefined}
+                className="btn-gold mt-4 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 {progress !== null ? <Loader2 size={13} className="animate-spin" /> : <CloudUpload size={13} />}
-                {progress !== null ? `上传中 ${progress}%` : "创建重建任务"}
+                {progress !== null
+                  ? `上传中 ${progress}%`
+                  : files.length < MIN_PHOTOS
+                    ? `还差 ${MIN_PHOTOS - files.length} 张（至少 ${MIN_PHOTOS} 张）`
+                    : "创建重建任务"}
               </button>
             </div>
           )}
@@ -458,26 +485,36 @@ export default function ReconstructionsPage() {
                         />
                       </div>
                     )}
+                    {/* 排队超时：说清卡在哪、能做什么，而不是让用户干等 */}
+                    {t.status === "pending" && now > 0 && now - new Date(t.created_at).getTime() > PENDING_STUCK_MS && (
+                      <p className="mt-1 text-[10px] leading-4" style={{ color: "#fbbf24" }}>
+                        已排队 {pendingWaitMinutes(t, now)} 分钟：{pendingReason(t, worker)}。可以点「重新尝试」重新派发，或点「取消」放弃这个任务。
+                      </p>
+                    )}
                   </div>
 
                   {/* 操作按钮 */}
-                  {(t.status === "failed" || t.status === "canceled") && (
+                  {(t.status === "pending" || t.status === "failed" || t.status === "canceled") && (
                     <button
                       onClick={async () => {
                         try {
                           const r = await api.retryTask(t.id);
-                          setMessage(r.workerStarted ? "已重新启动" : `重试排队：${r.workerError ?? ""}`);
+                          setMessage(
+                            r.workerStarted
+                              ? "已重新派发，等待 Worker 开始处理…"
+                              : `未能派发：${r.workerError ?? "未知原因"}`
+                          );
                           setMessageType(r.workerStarted ? "success" : "error");
                           refreshTasks();
                         } catch (e) {
-                          setMessage(e instanceof Error ? e.message : "重试失败");
+                          setMessage(e instanceof Error ? e.message : "重新尝试失败");
                           setMessageType("error");
                         }
                       }}
                       className="btn-ghost shrink-0"
                       style={{ color: "#a855f7" }}
                     >
-                      <RefreshCw size={11} /> 重试
+                      <RefreshCw size={11} /> 重新尝试
                     </button>
                   )}
                   {(t.status === "pending" || t.status === "processing") && (

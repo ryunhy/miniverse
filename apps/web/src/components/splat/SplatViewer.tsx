@@ -20,8 +20,10 @@ interface SplatViewerProps {
   orient?: "identity" | "colmap-nerfstudio";
   /** 关联重建任务 ID：提供时按训练相机取景 */
   taskId?: string | null;
+  /** 与网格查看器同步视角（默认开） */
+  syncEnabled?: boolean;
 }
 
-export default function SplatViewerLazy({ url, height = 520, orient = "identity", taskId }: SplatViewerProps) {
-  return <SplatViewer url={url} height={height} orient={orient} taskId={taskId} />;
+export default function SplatViewerLazy({ url, height = 520, orient = "identity", taskId, syncEnabled = true }: SplatViewerProps) {
+  return <SplatViewer url={url} height={height} orient={orient} taskId={taskId} syncEnabled={syncEnabled} />;
 }

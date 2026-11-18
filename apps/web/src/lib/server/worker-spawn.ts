@@ -253,7 +253,9 @@ export function spawnReconstructionWorker(taskId: string, params: Record<string,
     child.unref();
     fs.writeFileSync(LOCK_FILE(), String(child.pid));
     store.setWorkerPid(taskId, child.pid ?? null);
-    store.appendEvent(taskId, "info", `Worker 已启动（${runner.label}，PID ${child.pid}）`);
+    // 只代表进程已拉起，不代表重建已经开始：任务仍可能是 pending（排队/环境未就绪），
+    // 文案必须与实际状态一致，避免用户把「已派发」误读成「正在重建」。
+    store.appendEvent(taskId, "info", `已派发给重建环境（${runner.label}，PID ${child.pid}），等待 Worker 开始处理`);
     return { ok: true, pid: child.pid };
   } catch (e) {
     return { ok: false, error: `Worker 启动失败: ${e instanceof Error ? e.message : String(e)}` };
@@ -267,6 +269,21 @@ export function releaseWorkerLock(): void {
   const lock = LOCK_FILE();
   try {
     if (fs.existsSync(lock)) fs.unlinkSync(lock);
+  } catch {
+    // 忽略
+  }
+}
+
+/**
+ * 仅在锁属于该任务时释放。
+ * 取消一个排队任务时，锁通常属于另一个正在运行的任务——无条件删锁会让两个 GPU 任务并行。
+ */
+export function releaseWorkerLockIfOwned(pid: number | null): void {
+  if (!pid) return;
+  const lock = LOCK_FILE();
+  try {
+    if (!fs.existsSync(lock)) return;
+    if (Number.parseInt(fs.readFileSync(lock, "utf8").trim(), 10) === pid) fs.unlinkSync(lock);
   } catch {
     // 忽略
   }

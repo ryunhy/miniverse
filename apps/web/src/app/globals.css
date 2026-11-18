@@ -258,6 +258,65 @@ input[type="number"]::-webkit-outer-spin-button {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+/* 无百分比进度（解析阶段）的滑块动画 */
+@keyframes mv-loading-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+/* ─────────────────────────────────────────────────────────
+   中窄屏（≤1100px）：顶栏次级操作（照片重建/历史版本/导出/导入/重置）
+   折叠进「更多」，只保留撤销/保存/预览，避免 820px 时按钮被裁出屏幕。
+───────────────────────────────────────────────────────── */
+.mv-topbar-more {
+  display: none;
+}
+@media (max-width: 1100px) {
+  .mv-topbar-secondary {
+    display: none !important;
+  }
+  .mv-topbar-more {
+    display: block;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────
+   窄屏（≤480px）：工具条各自横向滚动，页面本身不横向溢出。
+   左右面板默认由 EditorShell 折叠，画布保持完整宽度与可交互。
+───────────────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .mv-topbar,
+  .mv-statusbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .mv-topbar::-webkit-scrollbar,
+  .mv-statusbar::-webkit-scrollbar {
+    display: none;
+  }
+  .mv-topbar > *,
+  .mv-statusbar > * {
+    flex-shrink: 0;
+  }
+  .mv-conflict {
+    width: calc(100vw - 1rem) !important;
+    left: 0.5rem !important;
+    right: 0.5rem !important;
+    bottom: 0.5rem !important;
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+  .mv-history {
+    width: calc(100vw - 1rem) !important;
+    left: 0.5rem !important;
+    right: 0.5rem !important;
+  }
+  .mv-toast {
+    max-width: calc(100vw - 2rem);
+    text-align: center;
+  }
+}
 
 /* ─────────────────────────────────────────────────────────
    骨架屏

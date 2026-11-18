@@ -1,7 +1,7 @@
 """UV 展开 + 多视角纹理烘焙 + GLB 导出。
 
 流程：xatlas 参数化 → 逐面选最优可见视角（法向朝向 + 深度一致 + 最近）→ 在 UV 空间
-      逐三角形仿射映射回源图双线性采样（带逐像素深度剔除）→ 洞填充 → 导出 GLB。
+      UV 重心还原 3D 后透视采样（逐像素深度/alpha 剔除）→ 洞填充 → 导出 GLB。
 """
 from __future__ import annotations
 
@@ -57,10 +57,17 @@ def undistort_maps(K: np.ndarray, dist: list, w: int, h: int):
 
 def select_best_views(store: ViewStore, centroids: np.ndarray, normals: np.ndarray,
                       tol_abs: float = 0.06, tol_rel: float = 0.03,
-                      min_facing: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+                      min_facing: float = 0.15, top_k: int = 1,
+                      sharpness_weight: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """按质心可见性排序；top_k=1 保留 (N,) API，其余返回 (N,K)，空位 -1/0。
+
+    候选仍须通过质心深度检查；top_k 不能找回所有质心均被遮挡的面。
+    """
+    if not isinstance(top_k, (int, np.integer)) or top_k < 1:
+        raise ValueError("top_k must be a positive integer")
     n = len(centroids)
-    best = np.full(n, -1, np.int32)
-    best_score = np.zeros(n, np.float64)
+    best = np.full((n, top_k), -1, np.int32)
+    best_score = np.zeros((n, top_k), np.float64)
     for i in range(len(store)):
         w, h = store.size(i)
         cam = store.c2w(i)
@@ -81,108 +88,200 @@ def select_best_views(store: ViewStore, centroids: np.ndarray, normals: np.ndarr
         if hit.size == 0:
             continue
         score = facing[hit] * (1.0 / (1.0 + z[hit] * 0.3))
-        better = score > best_score[hit]
-        sel = hit[better]
-        best[sel] = i
-        best_score[sel] = score[better]
+        if sharpness_weight > 0:
+            gray = cv2.cvtColor(store.rgb(i), cv2.COLOR_RGB2GRAY).astype(np.float32)
+            lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+            local = bilinear(np.abs(lap), uv[hit, 0], uv[hit, 1])
+            score *= 1.0 + sharpness_weight * np.clip(local / 20.0, 0, 1)
+        if top_k == 1:
+            better = score > best_score[hit, 0]
+            sel = hit[better]
+            best[sel, 0] = i
+            best_score[sel, 0] = score[better]
+        else:
+            worst = np.argmin(best_score[hit], axis=1)
+            better = score > best_score[hit, worst]
+            sel = hit[better]
+            best[sel, worst[better]] = i
+            best_score[sel, worst[better]] = score[better]
+            order = np.argsort(-best_score[sel], axis=1, kind="stable")
+            best[sel] = np.take_along_axis(best[sel], order, axis=1)
+            best_score[sel] = np.take_along_axis(best_score[sel], order, axis=1)
+    if top_k == 1:
+        return best[:, 0], best_score[:, 0]
     return best, best_score
 
 
 def bake_texture(store: ViewStore, verts: np.ndarray, faces: np.ndarray, uvs: np.ndarray,
-                 best_view: np.ndarray, tex_size: int, tol_abs: float = 0.06) -> tuple[np.ndarray, dict]:
+                 best_view: np.ndarray, tex_size: int, tol_abs: float = 0.06, *,
+                 view_scores: np.ndarray | None = None, color_conflict_threshold: float = 40.0,
+                 alpha_min: float = 0.5, projection_mode: str = "perspective",
+                 fill_holes: bool = True) -> tuple[np.ndarray, dict]:
+    """候选须按质量排序；无 scores 时按 1/(rank+1) 加权，仅融合有效采样。
+
+    任一 RGB 通道的有效候选极差 > 40（0..255 色阶）时选最高权重有效单视角。
+    40 是保守的实验阈值（非感知色差/实景标定值），可显式调整至 0..255。
+    alpha_min 使用 0..1；uint8 alpha 转为 0..1。affine 仅供投影对照实验。
+    pixels_written 为独立直接采样 texel；补绘不计作真实观测。旧元数据来源 unknown。
+    """
+    if tex_size < 1 or projection_mode not in ("perspective", "affine"):
+        raise ValueError("invalid texture size or projection mode")
+    if not 0 <= color_conflict_threshold <= 255 or not 0 <= alpha_min <= 1:
+        raise ValueError("invalid conflict threshold or alpha_min")
+    candidates = np.asarray(best_view)
+    if candidates.ndim == 1:
+        candidates = candidates[:, None]
+    if (candidates.ndim != 2 or len(candidates) != len(faces)
+            or not np.issubdtype(candidates.dtype, np.integer)
+            or np.any(candidates < -1) or np.any(candidates >= len(store))):
+        raise ValueError("best_view must contain view indices with shape (N,) or (N,K)")
+    if view_scores is None:
+        weights = np.broadcast_to(1.0 / (np.arange(candidates.shape[1]) + 1), candidates.shape)
+    else:
+        weights = np.asarray(view_scores, dtype=np.float64)
+        if weights.ndim == 1:
+            weights = weights[:, None]
+        if weights.shape != candidates.shape or not np.isfinite(weights).all() or np.any(weights < 0):
+            raise ValueError("view_scores must be finite, nonnegative and match best_view")
     tex = np.zeros((tex_size, tex_size, 3), np.float32)
     written = np.zeros((tex_size, tex_size), bool)
-    # 每个视角的源图（懒加载 + 去畸变缓存）
-    src_cache: dict[int, np.ndarray] = {}
+    provenance = np.zeros_like(written, dtype=np.uint8)
+    conflicts = np.zeros_like(written)
+    # 只在第一次使用视角时转换整图；深度/alpha 同样缓存，避免每面复制。
+    src_cache: dict[int, tuple] = {}
 
-    def source(i: int) -> np.ndarray:
+    def source(i: int) -> tuple:
         if i not in src_cache:
+            if len(src_cache) >= 24:
+                src_cache.pop(next(iter(src_cache)))
             rgb = store.rgb(i)
             info = store.info(i)
             mx, my = undistort_maps(store.K(i), info.get("distortion") or [], rgb.shape[1], rgb.shape[0])
             if mx is not None:
                 rgb = cv2.remap(rgb, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-            src_cache[i] = rgb
+            alpha = store.alpha(i)
+            scale = 255.0 if alpha.dtype == np.uint8 else 1.0
+            # 只信任显式 rgb_source；禁止由目录名、图像内容或旧元数据猜测照片。
+            kind = info.get("rgb_source", store.meta.get("rgb_source", "unknown"))
+            code = {"generated": 1, "photograph": 2}.get(kind, 4) if isinstance(kind, str) else 4
+            src_cache[i] = (rgb, store.depth(i),
+                            alpha.astype(np.float32) / scale, code)
         return src_cache[i]
 
     uv_px = uvs * (tex_size - 1)
-    stats = {"faces": int(len(faces)), "faces_without_view": 0, "pixels_written": 0}
-
-    for f in range(len(faces)):
-        vi = best_view[f]
-        if vi < 0:
+    stats = {"faces": int(len(faces)), "faces_without_view": 0, "faces_degenerate": 0,
+             "faces_without_pixels": 0, "projection_mode": projection_mode,
+             "color_conflict_threshold": float(color_conflict_threshold)}
+    for f, face in enumerate(faces):
+        tri_uv, tri = uv_px[face], verts[face]
+        if not np.isfinite(tri_uv).all() or not np.isfinite(tri).all():
+            stats["faces_degenerate"] += 1
+            continue
+        v0, v1 = tri_uv[1] - tri_uv[0], tri_uv[2] - tri_uv[0]
+        den = v0[0] * v1[1] - v1[0] * v0[1]
+        edges = tri[1:] - tri[0]
+        area = np.linalg.norm(np.cross(edges[0], edges[1]))
+        if (abs(den) <= 1e-12
+                or area <= 1e-12 * max(1.0, np.linalg.norm(edges[0]) * np.linalg.norm(edges[1]))):
+            stats["faces_degenerate"] += 1
+            continue
+        active = (candidates[f] >= 0) & (weights[f] > 0)
+        if not active.any():
             stats["faces_without_view"] += 1
             continue
-        tri_uv = uv_px[faces[f]]
         xmin = max(int(np.floor(tri_uv[:, 0].min())), 0)
         xmax = min(int(np.ceil(tri_uv[:, 0].max())), tex_size - 1)
         ymin = max(int(np.floor(tri_uv[:, 1].min())), 0)
         ymax = min(int(np.ceil(tri_uv[:, 1].max())), tex_size - 1)
-        if xmax - xmin < 0 or ymax - ymin < 0:
+        if xmax < xmin or ymax < ymin:
+            stats["faces_without_pixels"] += 1
             continue
-
-        # 3D 三角形 → 图像坐标
-        c2w = store.c2w(vi)
-        K = store.K(vi)
-        uv_img, z_img = project_points(c2w, K, verts[faces[f]])
-        if not np.all(np.isfinite(uv_img)):
-            continue
-        src = source(vi)
-        h_src, w_src = src.shape[:2]
-        A = cv2.getAffineTransform(tri_uv.astype(np.float32), uv_img.astype(np.float32))
-
         gx, gy = np.meshgrid(np.arange(xmin, xmax + 1), np.arange(ymin, ymax + 1))
-        px = np.stack([gx.ravel(), gy.ravel(), np.ones(gx.size)], 1)
-        # 重心坐标判内
-        v0 = tri_uv[1] - tri_uv[0]
-        v1 = tri_uv[2] - tri_uv[0]
-        v2 = px[:, :2] - tri_uv[0]
-        den = v0[0] * v1[1] - v1[0] * v0[1]
-        if abs(den) < 1e-12:
-            continue
+        v2 = np.column_stack([gx.ravel(), gy.ravel()]) - tri_uv[0]
         s = (v2[:, 0] * v1[1] - v1[0] * v2[:, 1]) / den
         t = (v0[0] * v2[:, 1] - v2[:, 0] * v0[1]) / den
         inside = (s >= -1e-4) & (t >= -1e-4) & (s + t <= 1 + 1e-4)
-        if not inside.any():
+        bary = np.column_stack([1 - s[inside] - t[inside], s[inside], t[inside]])
+        points = bary @ tri
+        count = len(points)
+        total = np.zeros(count)
+        accum = np.zeros((count, 3))
+        low, high = np.full((count, 3), np.inf), np.full((count, 3), -np.inf)
+        strongest = np.zeros(count)
+        chosen = np.zeros((count, 3))
+        origins, chosen_origin = np.zeros(count, np.uint8), np.zeros(count, np.uint8)
+        seen = set()
+        for rank in np.flatnonzero(active):
+            vi = int(candidates[f, rank])
+            if vi in seen:
+                continue
+            seen.add(vi)
+            c2w, K = store.c2w(vi), store.K(vi)
+            uv_img, z_pix = project_points(c2w, K, points)
+            if projection_mode == "affine":
+                corners, _ = project_points(c2w, K, tri)
+                uv_img = bary @ corners
+            src, depth, alpha, origin = source(vi)
+            h, w = src.shape[:2]
+            if depth.shape != (h, w) or alpha.shape != (h, w):
+                raise ValueError("RGB, depth and alpha must share image coordinates")
+            u, v = uv_img.T
+            ok = (np.isfinite(uv_img).all(axis=1) & np.isfinite(z_pix) & (z_pix > 1e-3)
+                  & (u >= 0) & (u <= w - 1) & (v >= 0) & (v <= h - 1))
+            idx = np.flatnonzero(ok)
+            dz = bilinear(depth, u[idx], v[idx])
+            a = bilinear(alpha, u[idx], v[idx])
+            valid = (np.isfinite(dz) & (dz > 1e-3) & np.isfinite(a) & (a > 0) & (a >= alpha_min)
+                     & (np.abs(dz - z_pix[idx]) <= np.maximum(tol_abs, np.abs(z_pix[idx]) * 0.03)))
+            idx = idx[valid]
+            colors = bilinear(src, u[idx], v[idx])
+            finite = np.isfinite(colors).all(axis=1)
+            idx, colors = idx[finite], colors[finite]
+            weight = weights[f, rank]
+            accum[idx] += colors * weight
+            total[idx] += weight
+            low[idx] = np.minimum(low[idx], colors)
+            high[idx] = np.maximum(high[idx], colors)
+            origins[idx] |= origin
+            stronger = weight > strongest[idx]
+            better = idx[stronger]
+            chosen[better] = colors[stronger]
+            chosen_origin[better] = origin
+            strongest[better] = weight
+        valid = total > 0
+        if not valid.any():
+            stats["faces_without_pixels"] += 1
             continue
-
-        map_px = px[inside] @ A.T
-        u = map_px[:, 0]
-        v = map_px[:, 1]
-        ok = (u >= 0) & (u <= w_src - 1) & (v >= 0) & (v <= h_src - 1)
-        if not ok.any():
-            continue
-        # 逐像素深度剔除（防止采样到遮挡物/背景）
-        d = store.depth(vi)
-        dz = bilinear(d, u[ok], v[ok])
-        # 由重心插值得到该像素的相机系深度
-        bary = np.stack([1 - s[inside][ok] - t[inside][ok], s[inside][ok], t[inside][ok]], 1)
-        z_pix = bary @ z_img
-        consistent = (dz > 1e-3) & (np.abs(dz - z_pix) <= np.maximum(tol_abs, np.abs(z_pix) * 0.03))
-        sel = np.where(ok)[0][consistent]
-        if sel.size == 0:
-            continue
-        colors = bilinear(src.astype(np.float32), u[ok][consistent], v[ok][consistent])
-        pix_idx = np.where(inside)[0][ok][consistent]
-        yy = gy.ravel()[pix_idx]
-        xx = gx.ravel()[pix_idx]
+        idx = np.flatnonzero(valid)
+        conflict = np.max(high[idx] - low[idx], axis=1) > color_conflict_threshold
+        colors = accum[idx] / total[idx, None]
+        colors[conflict] = chosen[idx[conflict]]
+        origin = origins[idx]  # 整数数组索引已返回副本，conflict 覆写不会污染 origins。
+        origin[conflict] = chosen_origin[idx[conflict]]
+        yy, xx = gy.ravel()[inside][idx], gx.ravel()[inside][idx]
         tex[yy, xx] = colors
-        written[yy, xx] = True
-        stats["pixels_written"] += int(sel.size)
+        written[yy, xx] = True  # 黑色是有效颜色，绝不能用 RGB!=0 判定。
+        provenance[yy, xx] = origin
+        conflicts[yy, xx] = conflict
 
-    # 洞填充：从已有像素向外扩散 4 轮（避免 UV 接缝处的黑边/空洞）
     filled = written.copy()
-    for _ in range(4):
-        if filled.all():
-            break
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
-            shifted_mask = np.roll(filled, (dy, dx), axis=(0, 1))
-            shifted_tex = np.roll(tex, (dy, dx), axis=(0, 1))
-            add = (~filled) & shifted_mask
-            tex[add] = shifted_tex[add]
-            filled |= add
-    stats["uv_fill_ratio"] = float(filled.mean())
-    stats["direct_bake_ratio"] = float(written.mean())
+    stats["uv_fill_method"] = "none"
+    if fill_holes and written.any() and not written.all():
+        from scipy import ndimage
+
+        iy, ix = ndimage.distance_transform_edt(~written, return_distances=False, return_indices=True)
+        tex[~written] = tex[iy[~written], ix[~written]]
+        filled[:] = True
+        stats["uv_fill_method"] = "edt_nearest"
+    # 来源按最终直接采样像素独立统计。混入 generated 即按 generated；其余含未知则 unknown。
+    generated = written & ((provenance & 1) != 0)
+    photograph = written & (provenance == 2)
+    unknown_source = written & ~generated & ~photograph
+    stats.update(pixels_written=int(written.sum()), pixels_filled=int((filled & ~written).sum()),
+                 pixels_unknown=int((~filled).sum()), pixels_conflict=int(conflicts.sum()),
+                 rgb_source_pixels={"generated": int(generated.sum()), "photograph": int(photograph.sum()),
+                                    "unknown": int(unknown_source.sum())},
+                 uv_fill_ratio=float(filled.mean()), direct_bake_ratio=float(written.mean()))
     return np.clip(tex, 0, 255).astype(np.uint8), stats
 
 
@@ -199,8 +298,15 @@ def export_glb(path: Path, verts: np.ndarray, faces: np.ndarray, uvs: np.ndarray
 
 def bake_to_glb(mesh_path: Path, views_dir: Path, out: Path, tex_size: int = 4096,
                 depth_fit: tuple[float, float] = (1.0, 0.0),
-                texture_out: Path | None = None, log=print) -> dict:
-    """UV 展开 + 纹理烘焙 + 导出 GLB，写 stats.json 并返回统计。"""
+                texture_out: Path | None = None, tol_abs: float | None = None,
+                log=print, *, top_k: int = 1, color_conflict_threshold: float = 40.0,
+                projection_mode: str = "perspective", sharpness_weight: float = 0.0) -> dict:
+    """UV 展开 + 纹理烘焙 + 导出 GLB，写 stats.json 并返回统计。
+
+    tol_abs：深度一致容差（米），None 时用各函数默认 0.06。TSDF 治理版的
+    闭合圆角/桥接面偏离实测面最多 2r（默认 10.5cm），6cm 容差会把它们全部
+    判为无视角（上轮 58%）导致贴图靠扩散填充；显式传 ~2r 的一半可让圆角面
+    直接取到正确颜色。"""
     t0 = time.time()
     verts, faces = load_mesh(Path(mesh_path))
     log(f"[mesh] verts={len(verts)} faces={len(faces)}")
@@ -213,16 +319,24 @@ def bake_to_glb(mesh_path: Path, views_dir: Path, out: Path, tex_size: int = 409
     normals = face_normals(new_verts, new_faces)
     centroids = new_verts[new_faces].mean(1)
     t1 = time.time()
-    best_view, score = select_best_views(store, centroids, normals)
-    # 兜底：没有正对视角的面放宽朝向阈值再试一次（仍要求深度一致，避免采到遮挡物）
-    missing = best_view < 0
+    tolerance = float(tol_abs) if tol_abs is not None else 0.06
+    best_view, score = select_best_views(store, centroids, normals, tol_abs=tolerance, top_k=top_k,
+                                         sharpness_weight=sharpness_weight)
+    # 兜底仅作用于完全没有候选的面，不把 (N,K) 空槽当作面索引。
+    missing = best_view < 0 if best_view.ndim == 1 else (best_view < 0).all(axis=1)
     if missing.any():
-        b2, s2 = select_best_views(store, centroids[missing], normals[missing], min_facing=-1.0)
-        best_view[missing] = b2
-        score[missing] = s2
-    log(f"[views] selected {time.time() - t1:.1f}s, no-view faces={(best_view < 0).sum()}")
+        b2, s2 = select_best_views(store, centroids[missing], normals[missing],
+                                   tol_abs=tolerance, min_facing=-1.0, top_k=top_k)
+        best_view[missing], score[missing] = b2, s2
+    missing = best_view < 0 if best_view.ndim == 1 else (best_view < 0).all(axis=1)
+    log(f"[views] selected {time.time() - t1:.1f}s, no-view faces={missing.sum()}")
 
-    texture, bstats = bake_texture(store, new_verts, new_faces, uvs, best_view, tex_size)
+    texture, bstats = bake_texture(store, new_verts, new_faces, uvs, best_view, tex_size,
+                                   tol_abs=tolerance, view_scores=score,
+                                   color_conflict_threshold=color_conflict_threshold,
+                                   projection_mode=projection_mode)
+    bstats["tol_abs"] = tolerance
+    bstats["top_k"] = top_k
     log(f"[bake] {time.time() - t1:.1f}s {json.dumps(bstats, ensure_ascii=False)}")
 
     out = Path(out)
@@ -236,7 +350,7 @@ def bake_to_glb(mesh_path: Path, views_dir: Path, out: Path, tex_size: int = 409
         "texture_size": tex_size,
         "vertices": int(len(new_verts)), "faces": int(len(new_faces)),
         "uv_min": uvs.min(0).round(5).tolist(), "uv_max": uvs.max(0).round(5).tolist(),
-        "faces_without_view": int((best_view < 0).sum()),
+        "faces_without_view": int(missing.sum()),
         "bake": bstats,
         "glb_bytes": out.stat().st_size,
         "elapsed_seconds": round(time.time() - t0, 1),
@@ -256,9 +370,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fit-a", type=float, default=1.0)
     ap.add_argument("--fit-b", type=float, default=0.0)
     ap.add_argument("--texture-out", type=Path, default=None)
+    ap.add_argument("--top-k", type=int, default=1)
+    ap.add_argument("--color-conflict-threshold", type=float, default=40.0)
+    ap.add_argument("--projection-mode", choices=["perspective", "affine"], default="perspective")
     args = ap.parse_args(argv)
     stats = bake_to_glb(args.mesh, args.views, args.out, tex_size=args.tex_size,
-                        depth_fit=(args.fit_a, args.fit_b), texture_out=args.texture_out)
+                        depth_fit=(args.fit_a, args.fit_b), texture_out=args.texture_out,
+                        top_k=args.top_k, color_conflict_threshold=args.color_conflict_threshold,
+                        projection_mode=args.projection_mode)
     print(json.dumps(stats, ensure_ascii=False, indent=2))
     return 0
 

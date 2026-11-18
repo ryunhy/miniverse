@@ -119,10 +119,18 @@ export const api = {
   /** 读取单个历史版本内容（用于恢复） */
   getSceneHistoryVersion: (id: string, revision: number) =>
     fetch(`/api/scenes/${id}/history/${revision}`).then((r) => json<{ scene: SceneData }>(r)),
-  listTasks: () => fetch("/api/reconstructions").then((r) => json<{ tasks: TaskRow[] }>(r)),
+  listTasks: () =>
+    fetch("/api/reconstructions").then((r) =>
+      json<{ tasks: TaskRow[]; worker: { busy: boolean; pid: number | null } }>(r)
+    ),
   getTask: (id: string) =>
     fetch(`/api/reconstructions/${id}`).then((r) =>
-      json<{ task: TaskRow; events: TaskEvent[]; logTail: string[] }>(r)
+      json<{
+        task: TaskRow;
+        events: TaskEvent[];
+        logTail: string[];
+        worker: { busy: boolean; pid: number | null };
+      }>(r)
     ),
   retryTask: (id: string) =>
     fetch(`/api/reconstructions/${id}/retry`, { method: "POST" }).then((r) =>
