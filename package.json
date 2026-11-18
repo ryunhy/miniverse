@@ -10,9 +10,10 @@
   "scripts": {
     "dev": "npm run dev -w apps/web",
     "build": "npm run build -w apps/web",
-    "lint": "npm run lint -w apps/web",
+    "lint": "npm run lint -w apps/web && npm run lint -w packages/shared",
     "typecheck": "npm run typecheck -w apps/web",
     "test": "vitest run",
+    "test:py": "node tools/run-py-tests.mjs",
     "tools:glb": "node tools/generate-furniture-glb.mjs",
     "tools:splat": "node tools/generate-demo-splat.mjs"
   },

@@ -4,5 +4,8 @@
   "private": true,
   "main": "src/index.ts",
   "types": "src/index.ts",
-  "description": "MiniVerse 前后端共享：场景 Schema（Zod）与素材白名单目录"
+  "description": "MiniVerse 前后端共享：场景 Schema（Zod）与素材白名单目录",
+  "scripts": {
+    "lint": "eslint src"
+  }
 }
