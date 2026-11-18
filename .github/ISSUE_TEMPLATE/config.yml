@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 协作与分区规则
+    url: https://github.com/ryunhy/miniverse/blob/main/CLAIM.md
+    about: 动手前先读 CLAIM.md（分区登记）与 CONTRIBUTING.md（流程与环境分级）
