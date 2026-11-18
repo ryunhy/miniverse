@@ -6,6 +6,6 @@
   "types": "src/index.ts",
   "description": "MiniVerse 前后端共享：场景 Schema（Zod）与素材白名单目录",
   "scripts": {
-    "lint": "eslint src"
+    "lint": "eslint src --max-warnings 0"
   }
 }
