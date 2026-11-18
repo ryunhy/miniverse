@@ -6,7 +6,11 @@
  *    后端没上报分阶段状态时，除输入阶段外一律 unknown，并在 UI 明说"未上报"。
  * 2. GLB 没产出就不能显示生成成功：ready 同时要求 status=completed 且 export=done。
  * 3. 推断/观测来源要能区分，provenance 原样透出，不在前端编造。
+ * 4. 失败必须说人话（卡 #700122）：诊断码 → 原因 + 解除条件 + 能否原样重试，
+ *    映射逻辑在 failure.ts（契约 docs/miniature/CONTRACT.md §4），本文件只透出结果。
  */
+
+import { explainMiniatureFailure, type FailureExplanation } from "@/lib/miniature/failure";
 
 export type TaskLikeStatus = "pending" | "processing" | "completed" | "failed" | "canceled";
 
@@ -26,6 +30,14 @@ export interface StageView extends StageDef {
 
 export interface MiniaturePayload {
   synthetic?: boolean;
+  /** worker 上报的微缩终态：ok / degraded / partial / unsupported / failed */
+  status?: string;
+  /** 微缩失败原因（含诊断码，如 LOW_REGISTRATION） */
+  error?: string;
+  /** 失败所在的阶段名（snake_case，来自 pipeline 的 failed_stage） */
+  failedStage?: string;
+  /** 同 failedStage 的 snake_case 原始键（worker 落盘形态），两者取其一 */
+  failed_stage?: string;
   /** worker 逐阶段上报：{ ingest: {state, detail, evidence}, ... } */
   stages?: Record<string, { state?: string; detail?: string; evidence?: string }>;
   glb?: { path?: string; bytes?: number; sha256?: string };
@@ -70,6 +82,8 @@ export interface MiniatureView {
   glb: { url: string; downloadUrl: string; bytes: number | null; sha256: string | null } | null;
   provenance: MiniaturePayload["provenance"] | null;
   banner: { level: "ok" | "warn" | "error"; text: string };
+  /** 失败归因（卡 #700122）：仅当任务失败或已完成但无可用 GLB 时给出 */
+  failure: FailureExplanation | null;
 }
 
 function parsePayload(result: string | null | undefined): MiniaturePayload {
@@ -157,13 +171,28 @@ export function deriveMiniatureView(task: TaskLike): MiniatureView {
       }
     : null;
 
+  // 失败归因（#700122）：诊断码 → 人话 + 解除条件 + 能否原样重试
+  const failure = ready
+    ? null
+    : explainMiniatureFailure({
+        status: task.status,
+        error: task.error ?? null,
+        miniatureStatus: payload.status ?? null,
+        miniatureError: payload.error ?? null,
+        failedStage: payload.failedStage ?? payload.failed_stage ?? null,
+        stageDetails: stages.map((s) => s.detail),
+      });
+
   let banner: MiniatureView["banner"];
   if (task.status === "canceled") {
     banner = { level: "warn", text: "任务已取消，没有生成产物。可重试后重新生成。" };
   } else if (task.status === "failed") {
-    banner = { level: "error", text: `生成失败：${task.error ?? "worker 未给出原因"}` };
+    banner = { level: "error", text: failure ? failure.summary : `生成失败：${task.error ?? "worker 未给出原因"}` };
   } else if (task.status === "completed" && !ready) {
-    banner = { level: "error", text: "任务已结束但没有可用的 GLB，不能视为生成成功。" };
+    banner = {
+      level: "error",
+      text: failure ? failure.summary : "任务已结束但没有可用的 GLB，不能视为生成成功。",
+    };
   } else if (task.status === "completed") {
     banner = { level: "ok", text: "生成完成，可直接预览与下载。" };
   } else if (stageSource === "task_status_only") {
@@ -182,6 +211,7 @@ export function deriveMiniatureView(task: TaskLike): MiniatureView {
     glb,
     provenance: payload.provenance ?? null,
     banner,
+    failure,
   };
 }
 
