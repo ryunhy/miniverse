@@ -41,3 +41,25 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # CPU 侧 Python 测试：不需要 CUDA / nerfstudio，只装测试专用依赖
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/reconstruction/requirements-dev.txt
+
+      - name: Install test deps
+        run: pip install -r services/reconstruction/requirements-dev.txt
+
+      # tools/run-py-tests.mjs 会回退到 PATH 上的 python3，与本地 `npm run test:py` 同一入口
+      - name: Pytest (CPU)
+        run: npm run test:py

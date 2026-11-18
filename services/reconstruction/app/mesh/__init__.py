@@ -13,6 +13,22 @@
       → texture_bake  （UV 展开 + 纹理烘焙 → GLB）
 """
 
-from .pipeline import export_mesh, MeshResult  # noqa: F401
+from importlib import import_module
+from typing import Any
+
+# 惰性再导出：pipeline 链路顶层 import torch/nerfstudio，包初始化不得急切拉起，
+# 否则 CPU 侧 pytest 收集 app.mesh.tests（如 test_tsdf_options）就需完整 GPU 依赖。
+# `from app.mesh import export_mesh` 语义不变（worker.py 的按需导入依赖此路径）。
+_LAZY_EXPORTS = {"export_mesh": ".pipeline", "MeshResult": ".pipeline"}
+
+
+def __getattr__(name: str) -> Any:
+    module = _LAZY_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module, __package__), name)
+    globals()[name] = value  # 缓存，后续访问直接命中 globals
+    return value
+
 
 __all__ = ["export_mesh", "MeshResult"]

@@ -1,0 +1,7 @@
+# MiniVerse 重建服务 — 测试专用依赖（CPU 侧，无需 CUDA / nerfstudio）
+# 仅覆盖 5 个 pytest 测试文件的传递依赖；完整运行环境见 requirements.txt。
+# cv2 为 ingest.py 中 try 守护的可选导入，测试路径不触发，故不列入。
+pytest>=8,<10
+numpy>=2
+scipy>=1.10
+Pillow>=10
