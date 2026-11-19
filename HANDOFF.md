@@ -2,15 +2,17 @@
 
 > 生成时间：2026-10-24 ｜ 交接人：zcode（会话：MiniVerse 2.0 通宵开发 + 真实重建阶段）
 > 下一任 Agent 请**先完整读完本文档**，再读 `PROGRESS.md`（两份里程碑段）与 `TEST_REPORT.md`。
+> **2026-11-19 纠偏（T-700015）**：回归基线改为当前实测（见「一」）、新增微缩支线章节（见「八」）、移除个人机器绝对路径。历史快照数字不追改；证据可达性与索取办法见 `docs/COLLABORATION-READINESS.md`，实测原始输出在 `docs/evidence/miniature/`。
 
 ## 一、项目一句话状态
 
 **MiniVerse = 上传真实房间照片 → COLMAP 位姿恢复 → Splatfacto 3DGS 训练 → 浏览器查看 → 编辑器叠加可编辑 GLB 家具。**
 核心产品能力（第一次真实照片重建全链路）**已于 2026-10-24 实证打通**，当前是"已验证的 MVP"，还不是商业化产品。
 
-- 代码：`C:\Users\WYX\.zcode\workspace\93096d68-ed46-47d7-8fe9-02b8d3f61fac\miniverse`（monorepo）
+- 代码：monorepo，仓库地址 `https://github.com/ryunhy/miniverse.git`，克隆到本地任意目录即可（旧交接写的个人机器绝对路径对协作者无效，已于 2026-11-19 移除；仓库内其余残留位置清单见 `docs/COLLABORATION-READINESS.md`）
 - 已验证指标：104 张真实照片 → COLMAP sequential CPU ~20 分钟 → Splatfacto 7000 步/1200px → 106MB scene.ply，训练 16 分 13 秒，**显存峰值 2987MiB / 8GB（37%）**（首次验证基线；后续 30000 步重训产物为 119MB / 47.99 万高斯，见 PROGRESS「质量治理」节）
-- 回归基线（2026-11-02 实测）：vitest **45/45**、tsc 0 错误、eslint **2 errors + 1 warning**（2 errors 位于当时未提交的 `apps/web/src/components/mesh/MeshViewerCore.tsx`，属 P5 并行改动）、next build EXIT=0（**17 条路由**：6 页面含 `/_not-found` + 11 API）
+- 回归基线（历史快照，2026-11-02 实测，保留不追改）：vitest **45/45**、tsc 0 错误、eslint **2 errors + 1 warning**（2 errors 位于当时未提交的 `apps/web/src/components/mesh/MeshViewerCore.tsx`，属 P5 并行改动）、next build EXIT=0（**17 条路由**：6 页面含 `/_not-found` + 11 API）
+- **回归基线（当前实测，2026-11-19 复核，T-700015）**：vitest **18 文件 / 173 例全过**（3.75s）、tsc **0 错误**、eslint **0 errors 0 warnings**（`--max-warnings 0`，旧 `EditorShell.tsx:23` 未用导入警告已不存在）、next build EXIT=0（**27 条路由项**、11 条 Turbopack 警告）。环境：Windows 10 26200 / Node v24.21.0 / npm 11.19.0；树状态：HEAD `d69405a` + 42 项并行卡未提交改动（测试数含并行卡新增用例与已合并 PR #2/#3 的门禁测试；任务卡所附 2026-11-18 基线为 15 文件 / 137 例，系当时树状态）。原始输出：`docs/evidence/miniature/four-checks-2026-11-19.log`
 
 ## 二、环境与启动（两个世界，别搞混）
 
@@ -19,7 +21,7 @@
 cd <仓库>/miniverse
 npm install          # 首次
 npm run dev          # http://localhost:3000（首页自动进编辑器）
-npm test             # vitest 45 个用例（2026-11-02 实测）
+npm test             # vitest；2026-11-19 实测 18 文件 / 173 例（见「一」当前基线）
 ```
 
 ### 重建世界（WSL2 Ubuntu 22.04，已装好）
@@ -113,3 +115,50 @@ data/           uploads / tasks(db) / scenes / processed / reconstructions
 - 背景检查在 `sample` 上如实报 `newHoles=1 / silhouetteMisses=10`（家具下方网格确有 1 条视线洞），
   功能可用、结果未美化；契约与限制详见 **`docs/SCENE-MANIFEST.md`**。
 - 样例数据 `data/reconstructions/sample/` 来自集成批次 `outputs/integration/sample/`，`data/` 不入库。
+
+## 八、微缩支线 miniature（照片 → 可打印小模型；2026-11-19 补写，T-700015）
+
+主线之外已有一条微缩支线：上传房间照片 → 复用 COLMAP 稀疏模型 → 六阶段
+（`ingest / structure / instances / geometry / texture / export`）产出微缩 GLB，可再导出 STL / 3MF。
+旧版 HANDOFF 全文未提及本支线，本节按 2026-11-19 磁盘实况补写。
+
+### 形态红线：开放盒子，顶不封
+
+- 微缩产物是**两面墙 + 一块地板、顶不封**的开放盒子，陈列视角；**不是封闭房间**。
+- 看到「封闭房间 / 看穿率越低越好」的旧判据，先按开放盒子口径重算：
+  向上射线 0 命中 = 顶开放；保留墙方向有命中、两开放侧 0 命中。
+- **不要用拼接 mesh 的 `trimesh.is_watertight` 判「房间是否封闭」**：多个独立闭合实心板
+  拼成的壳体该值仍为 True（按连通体判边共享），会误导。正确判据 = 室内射线开放度 +
+  逐块闭合计数（记忆 #342，已验证 2026-11-19；单连通体水密检查 `watertight.py` 不受此影响）。
+
+### 尺度限制：UNMETRIC_SCALE
+
+- COLMAP/SfM 无米制基准：产物单位是 `nu`，`meters_per_unit=null`，诊断固定带
+  `UNMETRIC_SCALE`（info）。**不得声明米制尺寸（米 / 毫米）**；解除条件是提供标定物，
+  方案见 `docs/miniature/SCALE-CALIBRATION.md`（标注「未实现」）。
+- 纹理含推断像素就必须标 `result.synthetic=true`（如 c858 场景 observed 0.467 / inferred 0.533），
+  禁止推断冒充实拍；合成夹具（fixture）结果一律不得当真实重建成功。
+
+### 代码与文档地图（2026-11-19 实测盘点）
+
+| 层 | 位置 | 实况 |
+|---|---|---|
+| Python 管线 | `services/reconstruction/app/miniature/` | 13 个模块（ingest/structure/instances/geometry/texture/pipeline/contracts/coordinates/sfm_io/completion/material_completion/print_export/watertight）+ `tests/` 8 个测试文件 |
+| Web 组件 | `apps/web/src/components/miniature/` | 3 个组件：MiniatureLive / MiniatureUploader / StageTimeline（另有 MiniatureUploader.test.tsx） |
+| Web 逻辑 | `apps/web/src/lib/miniature/stages.ts` | 六阶段消费契约 + stages.test.ts |
+| 路由 | `/miniature`、`/miniature/[id]`、API `/api/reconstructions/[id]/miniature` | 上传页 / 详情页 / 结果接口（三态文案见 T-700018 证据） |
+| 文档 | `docs/miniature/` | 7 份：CONTRACT / THRESHOLDS / RUNBOOK / DELIVERY / BENCHMARK / DATA-PROVENANCE / SCALE-CALIBRATION。**CONTRACT 与 THRESHOLDS 是契约与阈值的单一出处**，改数字必须两处同步并附实测依据 |
+
+### 已知断点与证据位置
+
+- **发布断点（A1，P0）**：worker 只把 GLB 写到 `data/reconstructions/<id>/miniature/glb/<id>/scene.glb`，
+  **不自动生成**网页详情页读取的 `scene.json` + `room.glb`；`tools/preview_scene_manifest.py`
+  在仓库中不存在（历史交付文档引用过它）。即「管线产物完整，发布到网页可读位置尚未自动化」，
+  详见 `docs/miniature/DELIVERY.md` ⑤ 与 `NEXT-STEPS.md` 阶段 1。
+- 输入准入硬门：≥20 个注册相机、朝向覆盖 ≥180°（`min_lookdir_bins=6/12`）等，
+  单一出处 `docs/miniature/THRESHOLDS.md`；上传页目前 3 张就能点，门槛提示未接（A4）。
+- 证据：`docs/evidence/miniature/`（本卡基线实测 + 证据可达性审计）、
+  `docs/evidence/miniature-three-states/`（T-700018 三态文案实测）、
+  `docs/evidence/cache-slots/`（T-700011 多槽缓存，**合成输入**，非真实重建）。
+  T-700072 原始产物 `workspaces/700072/artifacts/` **仓库内取不到**，
+  索取办法与逐条可达性标注见 `docs/COLLABORATION-READINESS.md`。

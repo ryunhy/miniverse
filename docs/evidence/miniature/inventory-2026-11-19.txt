@@ -1,0 +1,51 @@
+# miniature 代码/文档盘点（T-700015，2026-11-19 实测 ls/find 输出）
+
+## Python 模块 services/reconstruction/app/miniature/
+services/reconstruction/app/miniature/__init__.py
+services/reconstruction/app/miniature/completion.py
+services/reconstruction/app/miniature/contracts.py
+services/reconstruction/app/miniature/coordinates.py
+services/reconstruction/app/miniature/geometry.py
+services/reconstruction/app/miniature/ingest.py
+services/reconstruction/app/miniature/instances.py
+services/reconstruction/app/miniature/material_completion.py
+services/reconstruction/app/miniature/pipeline.py
+services/reconstruction/app/miniature/print_export.py
+services/reconstruction/app/miniature/sfm_io.py
+services/reconstruction/app/miniature/structure.py
+services/reconstruction/app/miniature/texture.py
+services/reconstruction/app/miniature/watertight.py
+
+## Python 测试
+services/reconstruction/app/miniature/tests/test_cache_slots.py
+services/reconstruction/app/miniature/tests/test_geometry_style.py
+services/reconstruction/app/miniature/tests/test_miniature.py
+services/reconstruction/app/miniature/tests/test_pipeline_072.py
+services/reconstruction/app/miniature/tests/test_pipeline_guards.py
+services/reconstruction/app/miniature/tests/test_print_export.py
+services/reconstruction/app/miniature/tests/test_sfm_merge.py
+services/reconstruction/app/miniature/tests/test_watertight.py
+
+## Web 组件
+MiniatureLive.tsx
+MiniatureUploader.test.tsx
+MiniatureUploader.tsx
+StageTimeline.tsx
+
+## Web 逻辑
+stages.test.ts
+stages.ts
+
+## 路由文件
+apps/web/src/app/api/reconstructions/[id]/miniature/route.ts
+apps/web/src/app/miniature/page.tsx
+apps/web/src/app/miniature/[id]/page.tsx
+
+## docs/miniature/
+BENCHMARK.md
+CONTRACT.md
+DATA-PROVENANCE.md
+DELIVERY.md
+RUNBOOK.md
+SCALE-CALIBRATION.md
+THRESHOLDS.md

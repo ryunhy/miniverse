@@ -112,8 +112,14 @@ node tools/verify-scene-manifest-client.mjs  # 真实 Chrome（headless + CDP）
 - `apps/web/src/lib/server/recon-editable-scene.test.ts`：14 例（schema/重复 id/非法变换/
   路径穿越/别名/版本冲突/未知 objectId/清除幂等）
 - `apps/web/src/lib/scene-types.test.ts`：3 例（role 推断、有限数值）
-- 四件套：`npm test`（12 文件 / 93 例）、`npm run typecheck`、`npm run lint`（0 error，
-  仅 `EditorShell.tsx:23` 历史未用导入警告）、`npm run build`
+- 四件套：`npm test`、`npm run typecheck`、`npm run lint`、`npm run build`。
+  旧表述「12 文件 / 93 例、仅 `EditorShell.tsx:23` 历史未用导入警告」是 2026-11-05 时点快照，已过期。
+  **当前实测（2026-11-19，T-700015 复核）**：vitest **18 文件 / 173 例全过**、tsc **0 错误**、
+  eslint **0 errors 0 warnings**（`--max-warnings 0`，EditorShell 未用导入警告已不存在）、
+  build EXIT=0（**27 条路由项**、11 条 Turbopack 警告）。
+  环境：Windows 10 26200 / Node v24.21.0 / npm 11.19.0，HEAD `d69405a` + 并行卡未提交改动
+  （测试数含并行卡新增用例；2026-11-18 基线为 15 文件 / 137 例）。
+  原始输出：`docs/evidence/miniature/four-checks-2026-11-19.log`。
 
 ## 七、已知限制
 
