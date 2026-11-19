@@ -40,6 +40,7 @@
 | 2026-11-19 | zcode | `main` + 本地工作树 | MemoryOS T-700014/700017：CLAIM.md / CONTRIBUTING.md / `.github/{PULL_REQUEST_TEMPLATE.md,ISSUE_TEMPLATE/}`；`apps/web/src/{proxy.ts,lib/server/auth.ts,lib/server/rate-limit.ts}` 及其测试 | 已释放 | 两卡已验收关闭（PR #2 e6298a3 / PR #3 d69405a 已合并）；T-700013 CI 门禁区已合并入 main（PR #1 59751db） |
 | 2026-11-19 | qoder（Qoder Desktop） | 本地工作树 | MemoryOS T-700006/700011/700012 独占区：`apps/web/src/components/miniature/{MiniatureUploader.tsx,MiniatureUploader.test.tsx(新增),StageTimeline.tsx}`、`apps/web/src/components/editor/LeftPanel.tsx`、`tools/generate-furniture-glb.mjs`、`services/reconstruction/app/miniature/{pipeline.py,tests/test_cache_slots.py(新增)}`、`apps/web/public/assets/furniture/previews/`(新增预览图)、`docs/evidence/cache-slots/`(新增证据)；**根构建配置登记**：`vitest.config.ts` include 增加 `*.test.tsx`、`apps/web/package.json` 增加 jsdom/@testing-library/react devDeps（组件测试必需，PR 时注明） | 进行中 | 三卡 task_done 验收后释放；不碰 THRESHOLDS.md/contracts.THRESHOLDS/asset-catalog.ts/Furniture.tsx/geometry.py/worker.py/sfm_io.py 及他人未提交改动 |
 
+| 2026-11-19 | zcode | `fix/task-status-finalize`（PR：任务状态收敛） | `apps/web/src/lib/server/{status-sync.ts,status-sync.test.ts(新增)}`；**`apps/web/src/lib/server/task-store.ts`（全局禁改区）** | 已释放 | MemoryOS 卡 #700127 已 task_done；task-store.ts 改动理由：STATUS_FLOW.pending 缺 `failed`，导致 worker 在首次同步前失败的任务永久卡 pending，需补白名单一行；影响面仅状态机白名单，不改任何契约字段 |
 > 规则：开工前在你那一行写清「谁 / 分支 / 路径 / 状态 / 何时释放」。收工后改成 `已释放`，不要直接删行（保留审计）。
 
 ## 三、登记规则
