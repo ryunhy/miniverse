@@ -301,6 +301,10 @@ def run_miniature_only(ctx: TaskContext) -> int:
         out = _miniature_stage(ctx, report_main=False)
         st = out.get("status")
         if st in ("ok", "degraded"):
+            publish = out.get("publish") or {}
+            if publish.get("state") == "failed":
+                report("failed", publish.get("error"), out)
+                return 1
             report("completed", result=out)
             log.info("微缩重试完成：task=%s status=%s", ctx.task_id, st)
             return 0
@@ -411,6 +415,8 @@ def _miniature_stage(ctx: TaskContext, report_main: bool = True) -> dict:
     # A1（卡 #700121）：跑完自动发布，不再依赖手工脚本把产物搬到网页可读位置
     out["publish"] = _publish_miniature_preview(ctx, out)
     if out["publish"].get("state") != "ok":
+        if out.get("glb"):
+            out["stages"]["export"] = {"state": "failed", "detail": out["publish"]["error"]}
         log.error("微缩发布失败：task=%s error=%s", ctx.task_id, out["publish"].get("error"))
     return out
 
@@ -549,63 +555,46 @@ def _miniature_payload(res: dict, out_dir: Path) -> dict:
 
 
 def _publish_miniature_preview(ctx: TaskContext, payload: dict) -> dict:
-    """微缩产物自动发布（A1，卡 #700121）：worker 跑完把产物发布到网页可读位置。
-
-    做两件事（逻辑复用 T-700074 的 tools/preview_scene_manifest.py，原来靠手工脚本补，现接入 worker 自动执行）：
-    1. 把微缩产物 `reconstructions/<id>/miniature/glb/<id>/scene.glb` 逐字节复制为
-       `reconstructions/<id>/room.glb`（网页资产路由只接受场景目录内的裸文件名）；
-    2. 由 `miniature/instances.json` 的实例 id 与 GLB 节点名生成 `scene.json`
-       （schema=miniverse.scene-manifest.v1，与 apps/web/src/lib/server/recon-editable-scene.ts
-       的 SCENE_MANIFEST_SCHEMA 一致），bytes/sha256 取自真实 GLB 字节。
-
-    原子性：两个产物都先写 .tmp 再 os.replace，不留半成品。
-    失败如实上报（返回 state=failed 与原因，并写日志），不静默、不阻断任务终态。
-    """
-    import hashlib  # noqa: PLC0415 - 仅发布用，避免无谓的顶层依赖面
-    import struct  # noqa: PLC0415
+    """先校验 GLB，再用原子替换清单的方式发布新版本。"""
+    import hashlib
+    import struct
+    import tempfile
 
     scene_dir = ctx.export_dir
+    staged_files: list[Path] = []
     try:
         glb_info = payload.get("glb") or {}
         src = glb_info.get("path")
-        if not src or not Path(src).exists():
-            return {"state": "failed", "error": f"微缩 GLB 产物缺失，无物可发布：{src or '未上报产物路径'}"}
+        if not src or not Path(src).is_file():
+            return {"state": "failed", "error": "微缩 GLB 产物缺失，无物可发布"}
 
-        # 1) room.glb：逐字节复制 + sha 校验（下载字节必须与产物一致）
         data = Path(src).read_bytes()
-        expect_sha = glb_info.get("sha256")
         actual_sha = hashlib.sha256(data).hexdigest()
+        expect_sha = glb_info.get("sha256")
         if expect_sha and actual_sha != expect_sha:
-            return {"state": "failed", "error": f"GLB 产物 sha256 与状态上报不一致（{actual_sha[:12]}≠{expect_sha[:12]}），拒绝发布"}
-        tmp_glb = scene_dir / "room.glb.tmp"
-        tmp_glb.write_bytes(data)
-        tmp_glb.replace(scene_dir / "room.glb")
+            return {"state": "failed", "error": "GLB 产物 SHA-256 与状态上报不一致"}
 
-        # 2) scene.json：清单 v1
-        node_names: list[str] = []
-        with Path(src).open("rb") as f:
-            magic, _ver, _total = struct.unpack("<III", f.read(12))
-            if magic != 0x46546C67:
-                raise ValueError("微缩产物不是合法 GLB（magic 不符）")
-            length, _ctype = struct.unpack("<II", f.read(8))
-            doc = json.loads(f.read(length).decode("utf-8"))
-        node_names = [n.get("name") for n in doc.get("nodes", []) if isinstance(n, dict) and n.get("name")]
+        magic, version, total = struct.unpack_from("<III", data)
+        length, chunk_type = struct.unpack_from("<II", data, 12)
+        if magic != 0x46546C67 or version != 2 or total != len(data):
+            raise ValueError("微缩产物不是有效的 glTF 2.0 GLB")
+        if chunk_type != 0x4E4F534A or length == 0 or length % 4 or 20 + length > total:
+            raise ValueError("GLB JSON 块无效")
+        doc = json.loads(data[20 : 20 + length])
+        node_names = {n.get("name") for n in doc.get("nodes", []) if isinstance(n, dict)}
 
         instances: list[dict] = []
         ins_path = scene_dir / "miniature" / "instances.json"
-        if ins_path.exists():
-            try:
-                instances = json.loads(ins_path.read_text(encoding="utf-8")).get("instances") or []
-            except Exception as e:  # noqa: BLE001 - instances 损坏不阻断发布，objects 置空并注明
-                log.warning("instances.json 解析失败，清单 objects 置空：%s", e)
+        if ins_path.is_file():
+            instances = json.loads(ins_path.read_text(encoding="utf-8")).get("instances") or []
 
-        objects = []
-        for rec in instances:
-            oid = rec.get("id")
-            if not oid:
-                continue
-            objects.append({"objectId": oid, "nodeName": oid if oid in node_names else (node_names[0] if node_names else oid)})
-
+        objects = [
+            {"objectId": oid, "nodeName": oid}
+            for rec in instances
+            if isinstance((oid := rec.get("id")), str) and oid in node_names
+        ]
+        asset_name = f"room-{actual_sha}.glb"
+        asset_path = scene_dir / asset_name
         manifest = {
             "schema": "miniverse.scene-manifest.v1",
             "sceneId": ctx.task_id,
@@ -613,30 +602,41 @@ def _publish_miniature_preview(ctx: TaskContext, payload: dict) -> dict:
             "upAxis": "+Y",
             "sourceFrame": {"upAxis": "+Y", "conversion": "miniature pipeline output (already Y-up)"},
             "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "generator": "app.worker._publish_miniature_preview（逻辑复用 T-700074 preview_scene_manifest.py）",
-            "note": (
-                "微缩管线自动发布的集成清单：room.glb 逐字节复制自 miniature/glb/<id>/scene.glb，"
-                "bytes/sha256 为真实产物值；objects 来自 miniature/instances.json。"
-            ),
-            "assets": {"scene": {"path": "room.glb", "bytes": len(data), "sha256": actual_sha}},
+            "generator": "app.worker._publish_miniature_preview",
+            "synthetic": bool(payload.get("synthetic")),
+            "assets": {"scene": {"path": asset_name, "bytes": len(data), "sha256": actual_sha}},
             "objects": objects,
         }
-        tmp_json = scene_dir / "scene.json.tmp"
-        tmp_json.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_json.replace(scene_dir / "scene.json")
+        # 旧清单始终指向它原先的资产。新资产写好之后才替换清单。
+        for target, content in (
+            (asset_path, data),
+            (scene_dir / "scene.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")),
+        ):
+            with tempfile.NamedTemporaryFile(dir=scene_dir, suffix=".tmp", delete=False) as fh:
+                staged = Path(fh.name)
+                staged_files.append(staged)
+                fh.write(content)
+            staged.replace(target)
+            staged_files.remove(staged)
 
-        log.info("微缩发布完成：task=%s room.glb=%d 字节 objects=%d", ctx.task_id, len(data), len(objects))
+        log.info("微缩发布完成：task=%s GLB=%d 字节 objects=%d", ctx.task_id, len(data), len(objects))
         return {
             "state": "ok",
-            "roomGlb": str(scene_dir / "room.glb"),
+            "roomGlb": str(asset_path),
             "sceneJson": str(scene_dir / "scene.json"),
             "bytes": len(data),
             "sha256": actual_sha,
             "objects": len(objects),
         }
-    except Exception as e:  # noqa: BLE001 - 发布失败必须留痕，不静默
+    except Exception as e:  # noqa: BLE001 - 发布失败必须留痕
         log.exception("微缩发布异常：task=%s", ctx.task_id)
         return {"state": "failed", "error": f"{type(e).__name__}: {e}"}
+    finally:
+        for staged in staged_files:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                log.warning("未能清理微缩发布临时文件：%s", staged)
 
 
 def _probe_miniature_env() -> dict:

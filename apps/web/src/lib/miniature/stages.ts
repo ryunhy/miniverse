@@ -41,6 +41,7 @@ export interface MiniaturePayload {
   /** worker 逐阶段上报：{ ingest: {state, detail, evidence}, ... } */
   stages?: Record<string, { state?: string; detail?: string; evidence?: string }>;
   glb?: { path?: string; bytes?: number; sha256?: string };
+  publish?: { state?: string; error?: string };
   provenance?: {
     photos?: string;
     texture?: string;
@@ -149,7 +150,8 @@ export function deriveMiniatureView(task: TaskLike): MiniatureView {
 
   const exportStage = stages.find((s) => s.key === "export");
   const glbOk = hasGlb(payload) && task.status === "completed" && exportStage?.state !== "failed";
-  const ready = glbOk;
+  const publishFailed = payload.publish?.state === "failed" && hasGlb(payload);
+  const ready = glbOk && !publishFailed;
 
   // GLB 拿不到时，导出阶段必须显式失败——不能显示"生成成功"。
   if (!ready) {
@@ -191,7 +193,9 @@ export function deriveMiniatureView(task: TaskLike): MiniatureView {
   } else if (task.status === "completed" && !ready) {
     banner = {
       level: "error",
-      text: failure ? failure.summary : "任务已结束但没有可用的 GLB，不能视为生成成功。",
+      text: publishFailed
+        ? "模型已生成，但发布失败：" + (payload.publish?.error || "请查看任务日志。")
+        : failure?.summary ?? "任务已结束但没有可用的 GLB，不能视为生成成功。",
     };
   } else if (task.status === "completed") {
     banner = { level: "ok", text: "生成完成，可直接预览与下载。" };
