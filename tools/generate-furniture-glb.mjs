@@ -4,11 +4,18 @@
  * 生成真实的 glTF 2.0 二进制文件（盒子组合建模，底部中心原点、Y 向上、米制尺寸），
  * 由 apps/web 通过 GLTFLoader 加载。产物为程序化模型（非美术素材），UI 端有明确标注。
  *
+ * 同时为每件家具渲染预览图（软件光栅化同一套盒子几何，正交相机 + 平面着色），
+ * 输出 PNG 到 previews/ 子目录，供素材库缩略图按 assetId 约定引用：
+ *   /assets/furniture/previews/<assetId>.png
+ * 预览图与 GLB 来自同一份几何定义，不是外部素材、不是占位图标。
+ *
  * 用法：node tools/generate-furniture-glb.mjs
- * 输出：apps/web/public/assets/furniture/*.glb + assets/furniture/（源备份）
+ * 输出：apps/web/public/assets/furniture/*.glb + previews/*.png
+ *       assets/furniture/（源备份，含 previews/）
  */
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -270,15 +277,187 @@ function buildGlb(parts) {
   return glb;
 }
 
+/* ---------- 预览图：软件光栅化（与 GLB 同一套盒子几何） ----------
+ * 正交相机 + 画家算法 + 平面着色，2x 超采样后降采样抗锯齿。
+ * 不引入任何新依赖：PNG 用 node:zlib 手工编码（RGBA8）。
+ */
+const PREVIEW_SIZE = 128; // 输出边长（px）
+const SS = 2; // 超采样倍率
+
+function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function norm(a) {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+}
+
+function boxFaces([cx, cy, cz, w, h, d, color]) {
+  const x0 = cx - w / 2, x1 = cx + w / 2;
+  const y0 = cy - h / 2, y1 = cy + h / 2;
+  const z0 = cz - d / 2, z1 = cz + d / 2;
+  // 每个面：4 顶点（逆时针）+ 外法线
+  return [
+    { n: [1, 0, 0], v: [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]] },
+    { n: [-1, 0, 0], v: [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]] },
+    { n: [0, 1, 0], v: [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]] },
+    { n: [0, -1, 0], v: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]] },
+    { n: [0, 0, 1], v: [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]] },
+    { n: [0, 0, -1], v: [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]] },
+  ].map((f) => ({ ...f, color }));
+}
+
+function renderPreview(parts, size = PREVIEW_SIZE) {
+  const S = size * SS;
+  const buf = new Float64Array(S * S * 4); // 预乘 RGBA 累积
+
+  // 相机：从右前上方看（Y 向上），正交投影
+  const zaxis = norm([1.3, 0.95, 1.7]); // 指向相机
+  const xaxis = norm(cross([0, 1, 0], zaxis));
+  const yaxis = cross(zaxis, xaxis);
+  const light = norm([0.45, 0.85, 0.5]);
+
+  const faces = parts.flatMap(boxFaces);
+  // 投影所有顶点，求 2D 包围盒以自适应居中缩放
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  const proj = faces.map((f) => {
+    const p = f.v.map((p3) => [dot(p3, xaxis), dot(p3, yaxis), dot(p3, zaxis)]);
+    for (const [u, v] of p) {
+      minU = Math.min(minU, u); maxU = Math.max(maxU, u);
+      minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+    }
+    return { ...f, p };
+  });
+  const scale = (0.78 * S) / Math.max(maxU - minU, maxV - minV);
+  const cu = (minU + maxU) / 2, cv = (minV + maxV) / 2;
+  const toPx = ([u, v]) => [S / 2 + (u - cu) * scale, S / 2 - (v - cv) * scale];
+
+  // 画家算法：远面先画（深度 = 沿 zaxis 投影，越大越靠近相机）
+  const visible = proj
+    .filter((f) => dot(f.n, zaxis) > 1e-6)
+    .map((f) => ({ ...f, depth: f.p.reduce((s, p) => s + p[2], 0) / 4 }))
+    .sort((a, b) => a.depth - b.depth);
+
+  function fillTri(t0, t1, t2, rgb) {
+    const xs = [t0[0], t1[0], t2[0]], ys = [t0[1], t1[1], t2[1]];
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)));
+    const x1 = Math.min(S - 1, Math.ceil(Math.max(...xs)));
+    const y0 = Math.max(0, Math.floor(Math.min(...ys)));
+    const y1 = Math.min(S - 1, Math.ceil(Math.max(...ys)));
+    const [ax, ay] = t0, [bx, by] = t1, [cx2, cy2] = t2;
+    const denom = (by - cy2) * (ax - cx2) + (cx2 - bx) * (ay - cy2);
+    if (Math.abs(denom) < 1e-9) return;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const px = x + 0.5, py = y + 0.5;
+        const w0 = ((by - cy2) * (px - cx2) + (cx2 - bx) * (py - cy2)) / denom;
+        const w1 = ((cy2 - ay) * (px - cx2) + (ax - cx2) * (py - cy2)) / denom;
+        const w2 = 1 - w0 - w1;
+        if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
+        const i = (y * S + x) * 4;
+        buf[i] = rgb[0]; buf[i + 1] = rgb[1]; buf[i + 2] = rgb[2]; buf[i + 3] = 1;
+      }
+    }
+  }
+
+  for (const f of visible) {
+    const n = f.n;
+    const shade = 0.38 + 0.62 * Math.max(0, dot(n, light));
+    const hex = parseInt(f.color.slice(1), 16);
+    const rgb = [((hex >> 16) & 255) * shade, ((hex >> 8) & 255) * shade, (hex & 255) * shade];
+    const q = f.p.map(toPx);
+    fillTri(q[0], q[1], q[2], rgb);
+    fillTri(q[0], q[2], q[3], rgb);
+  }
+
+  // 降采样（预乘平均 → 直通 RGBA）
+  const out = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let dy = 0; dy < SS; dy++) {
+        for (let dx = 0; dx < SS; dx++) {
+          const i = ((y * SS + dy) * S + x * SS + dx) * 4;
+          r += buf[i]; g += buf[i + 1]; b += buf[i + 2]; a += buf[i + 3];
+        }
+      }
+      const n = SS * SS;
+      const o = (y * size + x) * 4;
+      const alpha = a / n;
+      out[o] = alpha > 0 ? Math.round(r / a) : 0;
+      out[o + 1] = alpha > 0 ? Math.round(g / a) : 0;
+      out[o + 2] = alpha > 0 ? Math.round(b / a) : 0;
+      out[o + 3] = Math.round(alpha * 255);
+    }
+  }
+  return encodePng(out, size, size);
+}
+
+/* ---------- PNG 编码（RGBA8，无滤镜，zlib deflate） ---------- */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(b) {
+  let c = 0xffffffff;
+  for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([len, body, crc]);
+}
+function encodePng(rgba, w, h) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 6;  // color type RGBA
+  const raw = Buffer.alloc((w * 4 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w * 4 + 1)] = 0; // filter: none
+    rgba.copy(raw, y * (w * 4 + 1) + 1, y * w * 4, (y + 1) * w * 4);
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", zlib.deflateSync(raw, { level: 9 })),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
 /* ---------- 主流程 ---------- */
 let count = 0;
+let previewBytes = 0;
 for (const [name, def] of Object.entries(FURNITURE)) {
-  const glb = buildGlb(def());
+  const parts = def();
+  const glb = buildGlb(parts);
+  const png = renderPreview(parts);
+  previewBytes += png.length;
   for (const dir of OUT_DIRS) {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${name}.glb`), glb);
+    const pdir = path.join(dir, "previews");
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(path.join(pdir, `${name}.png`), png);
   }
   count++;
-  console.log(`✓ ${name}.glb (${(glb.length / 1024).toFixed(1)} KB)`);
+  console.log(`✓ ${name}.glb (${(glb.length / 1024).toFixed(1)} KB) + previews/${name}.png (${(png.length / 1024).toFixed(1)} KB)`);
 }
-console.log(`完成：${count} 个程序化 GLB 家具已写入 public/assets/furniture 与 assets/furniture`);
+console.log(`完成：${count} 个程序化 GLB 家具 + ${count} 张预览图已写入 public/assets/furniture 与 assets/furniture`);
+console.log(`预览图单份总体积：${(previewBytes / 1024).toFixed(1)} KB（${count} 张，验收上限 1 MB）`);
+if (previewBytes >= 1024 * 1024) {
+  console.error("预览图总体积超过 1 MB 验收上限，请降低 PREVIEW_SIZE 或简化着色");
+  process.exit(1);
+}

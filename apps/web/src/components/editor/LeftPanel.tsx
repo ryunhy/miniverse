@@ -130,20 +130,29 @@ export default function LeftPanel() {
                   e.currentTarget.style.background = "rgba(10,15,30,0.7)";
                 }}
               >
-                {/* 颜色预览区域 */}
+                {/* 预览图：与 GLB 同一套程序化几何渲染（tools/generate-furniture-glb.mjs），
+                    路径按 assetId 约定推导：/assets/furniture/previews/<assetId>.png。
+                    图缺失时 onError 隐藏 img，露出底下的线性图标兜底（不标注占位字样）。 */}
                 <span
-                  className="h-10 w-full rounded-lg flex items-center justify-center relative overflow-hidden"
+                  className="h-16 w-full rounded-lg flex items-center justify-center relative overflow-hidden"
                   style={{
-                    background: `linear-gradient(135deg, ${a.defaultColor}55, ${a.defaultColor}22)`,
+                    background: `linear-gradient(135deg, ${a.defaultColor}33, ${a.defaultColor}14)`,
                     border: `1px solid ${a.defaultColor}44`,
                   }}
                 >
-                  {/* 缩略图位：程序化 GLB 无贴图预览，用线性图标 + 分类色占位，
-                      尺寸文字在下方，避免只剩一个几像素的小圆点 */}
                   <Box
                     size={22}
                     strokeWidth={1.5}
                     style={{ color: a.defaultColor, opacity: 0.85, filter: `drop-shadow(0 0 6px ${a.defaultColor}55)` }}
+                  />
+                  {/* eslint-disable-next-line @next/next/no-img-element -- 静态小尺寸预览图，next/image 优化收益为负 */}
+                  <img
+                    src={`/assets/furniture/previews/${a.assetId}.png`}
+                    alt={`${a.label}预览（程序化模型渲染）`}
+                    className="absolute inset-0 h-full w-full object-contain"
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                    }}
                   />
                   {/* 扫描线动画 */}
                   <span
@@ -170,7 +179,7 @@ export default function LeftPanel() {
                       <Box size={8} /> GLB
                     </span>
                   ) : (
-                    <span className="text-[9px] text-slate-600">占位</span>
+                    <span className="text-[9px] text-slate-600">无 GLB</span>
                   )}
                 </span>
 
@@ -187,7 +196,7 @@ export default function LeftPanel() {
             className="shrink-0 px-3 py-2 text-[9px] leading-4 text-slate-600"
             style={{ borderTop: "1px solid rgba(139,92,246,0.08)" }}
           >
-            GLB 模型程序化生成（真实 glTF 链路）；「占位」以几何体替代
+            GLB 模型程序化生成（真实 glTF 链路）；预览图由同一套几何渲染
           </div>
         </>
       ) : (

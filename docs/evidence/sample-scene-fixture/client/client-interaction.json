@@ -1,0 +1,230 @@
+{
+  "tool": "tools/verify-scene-manifest-client.mjs",
+  "target_url": "http://127.0.0.1:3211/reconstructions/sample",
+  "started_at": "2026-11-18T15:06:25.477Z",
+  "data_origin": {
+    "manifest_path": "D:\\anzhuangbao\\miniverse\\data\\reconstructions\\sample\\scene.json",
+    "synthetic": true,
+    "note": "程序生成样例场景，非真实重建；仅供 scene-manifest v1 客户端契约验收，不得作为真实重建证据",
+    "generator": {
+      "tool": "tools/generate-sample-scene.mjs",
+      "definition": "tools/sample-scene/scene-definition.json"
+    }
+  },
+  "steps": [
+    {
+      "step": "load",
+      "objects": [
+        "obj-room",
+        "obj-walls",
+        "obj-floor",
+        "obj-sofa"
+      ],
+      "sceneId": "sample"
+    },
+    {
+      "step": "select",
+      "via": "canvas",
+      "screen": {
+        "x": 301,
+        "y": 287
+      },
+      "selectedId": "obj-sofa"
+    },
+    {
+      "step": "transform",
+      "via": "gizmo",
+      "before": [
+        0,
+        0,
+        0
+      ],
+      "after": [
+        1.484,
+        0,
+        0
+      ],
+      "canUndo": true
+    },
+    {
+      "step": "undo",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "selectedId": "obj-sofa",
+      "restored": true,
+      "canvas_pixels_identical_to_before": true,
+      "canvas_pixels_changed_by_drag": true,
+      "pixels_changed_by_drag": true
+    },
+    {
+      "step": "background-check",
+      "check": {
+        "rays": 576,
+        "baselineHits": 156,
+        "afterHits": 156,
+        "backgroundHits": 141,
+        "newHoles": 0,
+        "silhouetteMisses": 0,
+        "coverage": 0.2708333333333333,
+        "backgroundCoverage": 0.9038461538461539,
+        "pass": true,
+        "checkedAt": "2026-11-18T15:06:33.486Z"
+      },
+      "sofaVisible": false,
+      "furnitureRemoved": true
+    },
+    {
+      "step": "undo-removal",
+      "sofaVisible": true,
+      "furnitureRemoved": false
+    },
+    {
+      "step": "save-reload",
+      "saved": [
+        0.04,
+        0,
+        0
+      ],
+      "afterReload": [
+        0.04,
+        0,
+        0
+      ],
+      "restored": true
+    },
+    {
+      "step": "cleanup",
+      "status": 200
+    }
+  ],
+  "verdict": {
+    "selection_ui_appeared": true,
+    "transform_ui_appeared": true,
+    "undo_ui_appeared": true,
+    "hide_ui_appeared": true,
+    "save_ui_present": true,
+    "background_check_pass": true,
+    "background_new_holes": 0,
+    "background_silhouette_misses": 0,
+    "canvas_pixels_changed_by_drag": true,
+    "canvas_pixel_diff_after_undo": 0,
+    "refresh_restore": true,
+    "object_list_ui": true,
+    "selection_via": "canvas",
+    "transform_via": "gizmo",
+    "synthetic": true,
+    "synthetic_annotation_visible": true
+  },
+  "scene_id": "sample",
+  "scene_version": "3ce046f8db525570c6fdd5d06c707f49bb02a23c2f56ea902ed54c9eecbbcca9",
+  "probe": {
+    "has_editable_root": true,
+    "button_texts": [
+      "移动",
+      "旋转",
+      "缩放",
+      "撤销",
+      "房间外壳（程序生成样例·非真实重建）背景",
+      "隐藏",
+      "墙体背景",
+      "隐藏",
+      "地板背景",
+      "隐藏",
+      "沙发家具",
+      "隐藏",
+      "移除家具并检查背景",
+      "恢复家具",
+      "布局已保存",
+      "重置布局",
+      "清除已保存"
+    ],
+    "keyword_hits": [
+      "移动",
+      "旋转",
+      "缩放",
+      "撤销",
+      "隐藏",
+      "移除家具",
+      "恢复家具",
+      "背景检查"
+    ],
+    "mode_buttons": [
+      "translate",
+      "rotate",
+      "scale"
+    ],
+    "undo_button": true,
+    "save_button": true,
+    "hide_buttons": 4,
+    "synthetic_annotation_visible": true
+  },
+  "debug_projection": {
+    "has_hook": "function",
+    "keys": [
+      "screen",
+      "gizmo",
+      "axes",
+      "canvas"
+    ],
+    "screen": {
+      "obj-room": {
+        "x": 315,
+        "y": 231
+      },
+      "obj-walls": {
+        "x": 315,
+        "y": 228
+      },
+      "obj-floor": {
+        "x": 315,
+        "y": 312
+      },
+      "obj-sofa": {
+        "x": 301,
+        "y": 287
+      }
+    },
+    "canvas": {
+      "left": 225,
+      "top": 131,
+      "width": 630,
+      "height": 618
+    },
+    "mv_keys": [
+      "ready",
+      "sceneId",
+      "sceneVersion",
+      "selectedId",
+      "mode",
+      "dirty",
+      "canUndo",
+      "undoDepth",
+      "furnitureRemoved",
+      "check",
+      "objects",
+      "screen",
+      "gizmo",
+      "axes",
+      "canvas"
+    ]
+  },
+  "canvas_before_sha_len": 37866,
+  "canvas_undo_sha_len": 37866,
+  "background_check": {
+    "rays": 576,
+    "baselineHits": 156,
+    "afterHits": 156,
+    "backgroundHits": 141,
+    "newHoles": 0,
+    "silhouetteMisses": 0,
+    "coverage": 0.2708333333333333,
+    "backgroundCoverage": 0.9038461538461539,
+    "pass": true,
+    "checkedAt": "2026-11-18T15:06:33.486Z"
+  },
+  "finished_at": "2026-11-18T15:06:36.989Z",
+  "reading": "真实浏览器（Chrome headless + CDP）在 /reconstructions/sample 上消费 scene-manifest v1：画布点选对象、坐标轴/输入框平移、撤销回到原位且画布像素完全一致、移除家具后背景检查无新增露洞、保存后刷新布局恢复。 ⚠ 本次场景为程序生成样例（synthetic=true，非真实重建）：以上只证明客户端交互契约可用，不代表任何真实重建的质量；背景检查数值按实际结果如实记录。"
+}

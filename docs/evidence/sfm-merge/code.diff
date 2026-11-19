@@ -1,0 +1,1030 @@
+diff --git a/services/reconstruction/app/miniature/sfm_io.py b/services/reconstruction/app/miniature/sfm_io.py
+index 2ceb270..ee9579d 100644
+--- a/services/reconstruction/app/miniature/sfm_io.py
++++ b/services/reconstruction/app/miniature/sfm_io.py
+@@ -60,8 +60,12 @@ def read_cameras_bin(path: Path) -> dict:
+     return cams
+ 
+ 
+-def read_images_bin(path: Path) -> list:
+-    """返回 [{id, qvec, tvec, camera_id, name, center, forward}]，center 为世界坐标相机中心。"""
++def read_images_bin(path: Path, with_points2d: bool = False) -> list:
++    """返回 [{id, qvec, tvec, camera_id, name, center, forward}]，center 为世界坐标相机中心。
++
++    with_points2d=True 时额外返回 points2d_xy（N×2）与 points2d_point3d_ids（N，uint64），
++    供子模型合并保留完整 2D 观测；默认行为与旧版完全一致。
++    """
+     out = []
+     with open(path, "rb") as f:
+         n = struct.unpack("<Q", f.read(8))[0]
+@@ -72,20 +76,30 @@ def read_images_bin(path: Path) -> list:
+             camera_id = struct.unpack("<I", f.read(4))[0]
+             name = _read_cstr(f)
+             n2d = struct.unpack("<Q", f.read(8))[0]
+-            f.seek(24 * n2d, 1)
++            raw2d = f.read(24 * n2d)
+             R = qvec2rotmat(q)
+             center = -R.T @ t
+-            out.append(
+-                {
+-                    "id": image_id,
+-                    "qvec": [float(v) for v in q],
+-                    "tvec": [float(v) for v in t],
+-                    "camera_id": camera_id,
+-                    "name": name,
+-                    "center": [float(v) for v in center],
+-                    "forward": [float(v) for v in R.T @ np.array([0.0, 0.0, 1.0])],
+-                }
+-            )
++            rec = {
++                "id": image_id,
++                "qvec": [float(v) for v in q],
++                "tvec": [float(v) for v in t],
++                "camera_id": camera_id,
++                "name": name,
++                "center": [float(v) for v in center],
++                "forward": [float(v) for v in R.T @ np.array([0.0, 0.0, 1.0])],
++            }
++            if with_points2d:
++                if n2d:
++                    # 第三字段是 uint64 位模式（point3D_id），必须按结构化 dtype 读，
++                    # 不能当 float64 读再转整数（位模式会被解释成非规格化浮点）。
++                    dt = np.dtype([("x", "<f8"), ("y", "<f8"), ("pid", "<u8")])
++                    arr = np.frombuffer(raw2d, dtype=dt)
++                    rec["points2d_xy"] = np.column_stack([arr["x"], arr["y"]])
++                    rec["points2d_point3d_ids"] = arr["pid"].copy()
++                else:
++                    rec["points2d_xy"] = np.zeros((0, 2), dtype=np.float64)
++                    rec["points2d_point3d_ids"] = np.zeros(0, dtype=np.uint64)
++            out.append(rec)
+     return out
+ 
+ 
+@@ -101,10 +115,12 @@ def read_points3d_bin(path: Path, with_tracks: bool = False) -> dict:
+     err = []
+     tracks = []
+     track_ids = []
++    track_p2d = []
++    point_ids = []
+     with open(path, "rb") as f:
+         n = struct.unpack("<Q", f.read(8))[0]
+         for _ in range(n):
+-            f.read(8)  # point3D_id
++            point_ids.append(struct.unpack("<Q", f.read(8))[0])
+             xyz.append(struct.unpack("<3d", f.read(24)))
+             rgb.append(struct.unpack("<3B", f.read(3)))
+             err.append(struct.unpack("<d", f.read(8))[0])
+@@ -113,10 +129,12 @@ def read_points3d_bin(path: Path, with_tracks: bool = False) -> dict:
+             if with_tracks:
+                 arr = np.frombuffer(f.read(8 * tl), dtype=np.uint32).reshape(-1, 2)
+                 track_ids.append(arr[:, 0].astype(np.int64))
++                track_p2d.append(arr[:, 1].astype(np.int64))
+             else:
+                 f.seek(8 * tl, 1)
+     out = {
+         "n": n,
++        "ids": np.asarray(point_ids, dtype=np.uint64),
+         "xyz": np.asarray(xyz, dtype=np.float64).reshape(-1, 3),
+         "rgb": np.asarray(rgb, dtype=np.uint8).reshape(-1, 3),
+         "error": np.asarray(err, dtype=np.float64),
+@@ -124,4 +142,327 @@ def read_points3d_bin(path: Path, with_tracks: bool = False) -> dict:
+     }
+     if with_tracks:
+         out["track_image_ids"] = track_ids
++        out["track_point2d_idx"] = track_p2d
+     return out
++
++
++# ---------------------------------------------------------------------------
++# T-700007：COLMAP 二进制写入器 + 多子模型合并（纯 Python/numpy，不依赖 pycolmap）
++# ---------------------------------------------------------------------------
++
++# 合并诊断码：全部可在测试里断言，不允许自由文本替代（与 contracts 诊断码同一约定）
++MERGE_OK = "MERGE_OK"
++MERGE_SINGLE_MODEL = "MERGE_SINGLE_MODEL"
++MERGE_NO_SHARED_IMAGES = "MERGE_NO_SHARED_IMAGES"
++MERGE_INSUFFICIENT_SHARED = "MERGE_INSUFFICIENT_SHARED"
++MERGE_DEGENERATE_GEOMETRY = "MERGE_DEGENERATE_GEOMETRY"
++MERGE_ALIGNMENT_FAILED = "MERGE_ALIGNMENT_FAILED"
++
++# 与 ingest.IMAGE_EXTS 同口径：注册率分母只数 processed/<id>/images 里的图片文件
++IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
++
++# 对齐残差上限（相对参考模型相机中心跨度）：超过即认为两模型并非同一场景的可对齐子集
++_ALIGNMENT_MAX_REL_RMS = 0.05
++
++
++class MergeError(RuntimeError):
++    """无法合并时抛出，携带诊断码；上游必须如实记录，不得静默取 sparse/0 冒充已合并。"""
++
++    def __init__(self, code: str, message: str):
++        super().__init__(message)
++        self.code = code
++
++
++def rotmat2qvec(R: np.ndarray) -> np.ndarray:
++    """旋转矩阵 → [w,x,y,z] 单位四元数（Shepperd 分支法，数值稳定）。"""
++    R = np.asarray(R, dtype=np.float64)
++    trace = R[0, 0] + R[1, 1] + R[2, 2]
++    if trace > 0:
++        s = 0.5 / np.sqrt(trace + 1.0)
++        w, x, y, z = 0.25 / s, (R[2, 1] - R[1, 2]) * s, (R[0, 2] - R[2, 0]) * s, (R[1, 0] - R[0, 1]) * s
++    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
++        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
++        w, x, y, z = (R[2, 1] - R[1, 2]) / s, 0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s
++    elif R[1, 1] > R[2, 2]:
++        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
++        w, x, y, z = (R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s
++    else:
++        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
++        w, x, y, z = (R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s
++    q = np.array([w, x, y, z], dtype=np.float64)
++    q /= np.linalg.norm(q)
++    if q[0] < 0:
++        q = -q
++    return q
++
++
++def write_cameras_bin(path: Path, cams: dict) -> None:
++    """cams 与 read_cameras_bin 输出同形。"""
++    with open(path, "wb") as f:
++        f.write(struct.pack("<Q", len(cams)))
++        for cid in sorted(cams):
++            c = cams[cid]
++            f.write(struct.pack("<IiQQ", c["camera_id"], c["model_id"], c["width"], c["height"]))
++            f.write(struct.pack("<%dd" % len(c["params"]), *c["params"]))
++
++
++def write_images_bin(path: Path, images: list) -> None:
++    """images 与 read_images_bin 输出同形；可选 points2d_xy / points2d_point3d_ids。"""
++    with open(path, "wb") as f:
++        f.write(struct.pack("<Q", len(images)))
++        for im in images:
++            f.write(struct.pack("<I", im["id"]))
++            f.write(struct.pack("<4d", *im["qvec"]))
++            f.write(struct.pack("<3d", *im["tvec"]))
++            f.write(struct.pack("<I", im["camera_id"]))
++            f.write(im["name"].encode("utf-8") + b"\x00")
++            xy = np.asarray(im.get("points2d_xy", np.zeros((0, 2))), dtype=np.float64).reshape(-1, 2)
++            pid = np.asarray(im.get("points2d_point3d_ids", np.zeros(0)), dtype=np.uint64)
++            if len(xy) != len(pid):
++                raise ColmapError("points2d_xy 与 points2d_point3d_ids 长度不一致")
++            f.write(struct.pack("<Q", len(xy)))
++            if len(xy):
++                dt = np.dtype([("x", "<f8"), ("y", "<f8"), ("pid", "<u8")])
++                arr = np.zeros(len(xy), dtype=dt)
++                arr["x"], arr["y"], arr["pid"] = xy[:, 0], xy[:, 1], pid
++                f.write(arr.tobytes())
++
++
++def write_points3d_bin(path: Path, points: dict) -> None:
++    """points 与 read_points3d_bin(with_tracks=True) 输出同形。
++
++    track_point2d_idx 缺省时写 0（合成夹具可不提供真实 2D 索引）。
++    """
++    n = int(points["n"])
++    xyz = np.asarray(points["xyz"], dtype=np.float64).reshape(-1, 3)
++    rgb = np.asarray(points["rgb"], dtype=np.uint8).reshape(-1, 3)
++    err = np.asarray(points["error"], dtype=np.float64)
++    ids = np.asarray(points.get("ids", np.arange(1, n + 1)), dtype=np.uint64)
++    timg = points["track_image_ids"]
++    tp2d = points.get("track_point2d_idx", [np.zeros(len(t), dtype=np.int64) for t in timg])
++    with open(path, "wb") as f:
++        f.write(struct.pack("<Q", n))
++        for i in range(n):
++            f.write(struct.pack("<Q", int(ids[i])))
++            f.write(struct.pack("<3d", *xyz[i]))
++            f.write(struct.pack("<3B", *rgb[i]))
++            f.write(struct.pack("<d", float(err[i])))
++            ti = np.asarray(timg[i], dtype=np.uint32)
++            tp = np.asarray(tp2d[i], dtype=np.uint32)
++            f.write(struct.pack("<Q", len(ti)))
++            if len(ti):
++                f.write(np.column_stack([ti, tp]).astype(np.uint32).tobytes())
++
++
++def _similarity_from_centers(src: np.ndarray, dst: np.ndarray):
++    """Umeyama 相似变换（含尺度）：dst ≈ s·R·src + t。返回 (s, R, t, rms)。
++
++    共享相机中心共线/重合 → MERGE_DEGENERATE_GEOMETRY；
++    对齐残差超过参考跨度 5% → MERGE_ALIGNMENT_FAILED（不是同一场景的可对齐子集）。
++    """
++    n = len(src)
++    mu_s, mu_d = src.mean(axis=0), dst.mean(axis=0)
++    X, Y = src - mu_s, dst - mu_d
++    try:
++        sx = np.linalg.svd(X, compute_uv=False)
++    except np.linalg.LinAlgError as e:
++        # 严格退化（共线/重合）时 LAPACK 可能不收敛，同样按退化诊断处理
++        raise MergeError(MERGE_DEGENERATE_GEOMETRY, f"共享相机中心退化（SVD 不收敛：{e}）") from e
++    if sx[0] < 1e-12 or sx[1] < 1e-9 * sx[0]:
++        raise MergeError(
++            MERGE_DEGENERATE_GEOMETRY,
++            f"共享相机中心退化（重合或共线，奇异值 {sx.tolist()}），无法估计相似变换",
++        )
++    try:
++        U, D, Vt = np.linalg.svd(Y.T @ X / n)
++    except np.linalg.LinAlgError as e:
++        raise MergeError(MERGE_DEGENERATE_GEOMETRY, f"共享相机中心退化（协方差 SVD 不收敛：{e}）") from e
++    S = np.eye(3)
++    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
++        S[2, 2] = -1
++    R = U @ S @ Vt
++    s = float((D * np.diag(S)).sum() / ((X * X).sum() / n))
++    t = mu_d - s * (R @ mu_s)
++    res = dst - (s * (src @ R.T) + t)
++    rms = float(np.sqrt((res * res).sum(axis=1).mean()))
++    span = float(np.linalg.norm(dst.max(axis=0) - dst.min(axis=0)))
++    if span > 1e-12 and rms / span > _ALIGNMENT_MAX_REL_RMS:
++        raise MergeError(
++            MERGE_ALIGNMENT_FAILED,
++            f"对齐残差过大（rms={rms:.6g}，参考跨度={span:.6g}，相对 {rms / span:.3f} > "
++            f"{_ALIGNMENT_MAX_REL_RMS}）：两模型不是同一场景的可对齐子集",
++        )
++    return s, R, t, rms
++
++
++def merge_sparse_models(model_dirs: list, out_dir: Path) -> dict:
++    """把多个 COLMAP 稀疏子模型合并为一个模型，写入 out_dir，返回合并报告。
++
++    算法：以注册图像最多的子模型为参考系；其余子模型用共享图像（≥3 张）的相机中心
++    估计相似变换（Umeyama，含尺度）对齐到参考系；图像按名字去重（共享图像保留参考系位姿），
++    相机按参数去重，点云取并集并重映射 track/point3D_id。
++
++    如实声明的近似：点云不做几何去重（下游 instances 已有退化簇处理）；
++    被合并模型在共享图像上的 2D 观测不并入（保留参考模型的观测）。
++
++    无法合并时抛 MergeError（带诊断码），不产出任何文件、不静默降级。
++    """
++    model_dirs = [Path(d) for d in model_dirs]
++    models = []
++    for d in model_dirs:
++        cams = read_cameras_bin(d / "cameras.bin")
++        imgs = read_images_bin(d / "images.bin", with_points2d=True)
++        p3 = d / "points3D.bin"
++        pts = (
++            read_points3d_bin(p3, with_tracks=True)
++            if p3.exists()
++            else {"n": 0, "ids": np.zeros(0, np.uint64), "xyz": np.zeros((0, 3)),
++                  "rgb": np.zeros((0, 3), np.uint8), "error": np.zeros(0),
++                  "track_image_ids": [], "track_point2d_idx": []}
++        )
++        models.append({"dir": d, "cams": cams, "imgs": imgs, "pts": pts})
++    valid = [m for m in models if m["imgs"]]
++    if len(valid) < 2:
++        raise MergeError(
++            MERGE_SINGLE_MODEL,
++            f"只有 {len(valid)} 个含注册图像的子模型，无需/无法合并（共 {len(models)} 个目录）",
++        )
++    ref = max(valid, key=lambda m: len(m["imgs"]))
++    # 参考模型排首位：共享图像去重时保留参考系位姿与 2D 观测（与报告声明一致）
++    valid = [ref] + [m for m in valid if m is not ref]
++    ref_names = {im["name"]: im for im in ref["imgs"]}
++
++    alignments = []
++    shared_counts = {}
++    for m in valid:
++        if m is ref:
++            continue
++        shared = [im["name"] for im in m["imgs"] if im["name"] in ref_names]
++        shared_counts[str(m["dir"])] = len(shared)
++        if not shared:
++            raise MergeError(
++                MERGE_NO_SHARED_IMAGES,
++                f"子模型 {m['dir']} 与参考模型 {ref['dir']} 无共享图像，无法对齐",
++            )
++        if len(shared) < 3:
++            raise MergeError(
++                MERGE_INSUFFICIENT_SHARED,
++                f"子模型 {m['dir']} 与参考模型仅 {len(shared)} 张共享图像（<3），无法可靠估计相似变换",
++            )
++        src = np.asarray([next(im["center"] for im in m["imgs"] if im["name"] == nm) for nm in shared])
++        dst = np.asarray([ref_names[nm]["center"] for nm in shared])
++        s, R, t, rms = _similarity_from_centers(src, dst)
++        alignments.append({"model": str(m["dir"]), "scale": s, "rotation": R.tolist(),
++                           "translation": t.tolist(), "rms_residual": rms, "shared": len(shared)})
++        # 对齐该子模型的相机位姿与点云到参考系
++        for im in m["imgs"]:
++            Rb = qvec2rotmat(np.asarray(im["qvec"]))
++            Cb = -Rb.T @ np.asarray(im["tvec"])
++            Cb2 = s * (R @ Cb) + t
++            Rb2 = Rb @ R.T
++            im["qvec"] = rotmat2qvec(Rb2).tolist()
++            im["tvec"] = (-Rb2 @ Cb2).tolist()
++            im["center"] = Cb2.tolist()
++            im["forward"] = (Rb2.T @ np.array([0.0, 0.0, 1.0])).tolist()
++        if m["pts"]["n"]:
++            m["pts"]["xyz"] = s * (m["pts"]["xyz"] @ R.T) + t
++
++    # 相机去重（model_id + 尺寸 + 参数完全一致视为同一相机）
++    merged_cams: dict = {}
++    cam_key_to_id: dict = {}
++    cam_maps = []
++    for m in valid:
++        cmap = {}
++        for cid, c in m["cams"].items():
++            key = (c["model_id"], c["width"], c["height"], tuple(c["params"]))
++            if key not in cam_key_to_id:
++                new_id = len(merged_cams) + 1
++                cam_key_to_id[key] = new_id
++                merged_cams[new_id] = {**c, "camera_id": new_id}
++            cmap[cid] = cam_key_to_id[key]
++        cam_maps.append(cmap)
++
++    # 图像按名字去重：参考系优先；重编号 1..N
++    merged_imgs: list = []
++    name_to_new: dict = {}
++    img_maps = []
++    for mi, m in enumerate(valid):
++        imap = {}
++        for im in m["imgs"]:
++            if im["name"] in name_to_new:
++                imap[im["id"]] = name_to_new[im["name"]]
++                continue
++            new_id = len(merged_imgs) + 1
++            name_to_new[im["name"]] = new_id
++            imap[im["id"]] = new_id
++            merged_imgs.append({
++                "id": new_id, "qvec": im["qvec"], "tvec": im["tvec"],
++                "camera_id": cam_maps[mi][im["camera_id"]], "name": im["name"],
++                "points2d_xy": im["points2d_xy"], "points2d_point3d_ids": im["points2d_point3d_ids"],
++                "_owner": mi,
++            })
++        img_maps.append(imap)
++
++    # 点云并集：重编号 1..M，track 的 image_id 与 points2D 的 point3D_id 全部重映射
++    merged_xyz, merged_rgb, merged_err, merged_timg, merged_tp2d = [], [], [], [], []
++    pt_maps = []
++    for mi, m in enumerate(valid):
++        pts = m["pts"]
++        pmap = {}
++        for i in range(pts["n"]):
++            new_id = len(merged_xyz) + 1
++            pmap[int(pts["ids"][i])] = new_id
++            merged_xyz.append(pts["xyz"][i])
++            merged_rgb.append(pts["rgb"][i])
++            merged_err.append(pts["error"][i])
++            merged_timg.append(np.asarray([img_maps[mi][int(v)] for v in pts["track_image_ids"][i]], dtype=np.int64))
++            merged_tp2d.append(pts["track_point2d_idx"][i])
++        pt_maps.append(pmap)
++    for im in merged_imgs:
++        pid = im["points2d_point3d_ids"]
++        if len(pid):
++            # 只重映射保留方模型已知的 point3D_id；未知/无效 id（如 kInvalidPoint3DId）原样保留
++            owner = im["_owner"]
++            im["points2d_point3d_ids"] = np.asarray(
++                [pt_maps[owner].get(int(v), int(v)) for v in pid], dtype=np.uint64
++            )
++
++    out_dir = Path(out_dir)
++    out_dir.mkdir(parents=True, exist_ok=True)
++    write_cameras_bin(out_dir / "cameras.bin", merged_cams)
++    write_images_bin(out_dir / "images.bin", merged_imgs)
++    write_points3d_bin(out_dir / "points3D.bin", {
++        "n": len(merged_xyz), "xyz": np.asarray(merged_xyz).reshape(-1, 3),
++        "rgb": np.asarray(merged_rgb, dtype=np.uint8).reshape(-1, 3),
++        "error": np.asarray(merged_err), "track_image_ids": merged_timg, "track_point2d_idx": merged_tp2d,
++    })
++    return {
++        "status": MERGE_OK,
++        "models": [{"dir": str(m["dir"]), "registered": len(m["imgs"]), "points": int(m["pts"]["n"])} for m in valid],
++        "reference": str(ref["dir"]),
++        "shared_images": shared_counts,
++        "alignments": alignments,
++        "registered_merged": len(merged_imgs),
++        "points_merged": len(merged_xyz),
++        "note": "共享图像保留参考模型位姿；点云取并集不做几何去重；被合并模型在共享图像上的 2D 观测不并入。",
++    }
++
++
++def registration_ratio(model_dir: Path, processed_images_dir: Path) -> dict:
++    """注册率 = 模型注册图像数 / processed/<id>/images 图片文件数（不得用 uploads）。
++
++    分母口径与 ingest.scan_scene 完全一致（IMAGE_EXTS，大小写不敏感，只数文件）。
++    """
++    model_dir, processed_images_dir = Path(model_dir), Path(processed_images_dir)
++    registered = len(read_images_bin(model_dir / "images.bin"))
++    total = (
++        sum(1 for p in processed_images_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
++        if processed_images_dir.is_dir()
++        else 0
++    )
++    return {
++        "registered": registered,
++        "total": total,
++        "ratio": registered / total if total else 0.0,
++        "denominator_source": str(processed_images_dir),
++    }
+diff --git a/services/reconstruction/app/pipeline/colmap.py b/services/reconstruction/app/pipeline/colmap.py
+index c17fdf9..2e9ba16 100644
+--- a/services/reconstruction/app/pipeline/colmap.py
++++ b/services/reconstruction/app/pipeline/colmap.py
+@@ -1,10 +1,17 @@
+ """COLMAP 相机位姿恢复（稀疏重建）。
+ 
+-流程：feature_extractor → exhaustive_matcher → mapper →（可选 image_undistorter）
++流程：feature_extractor → exhaustive_matcher → mapper → 多子模型自动合并 →（可选 image_undistorter）
+ 优先复用官方二进制，不重新实现算法。输出 sparse/0/{cameras,images,points3D}.bin。
++
++T-700007：mapper 可能把同一场景分裂成多个子模型（sparse/0、sparse/1…），只读 sparse/0
++会低估注册率（实测 f1014582：60/104 vs 合并后 102/104，见 docs/miniature/THRESHOLDS.md）。
++现在 mapper 之后自动合并（sfm_io.merge_sparse_models，纯 Python）：
++- 合并成功：原始子模型移入 sparse/raw/，合并结果放 sparse/0（ingest._find_colmap 口径不变）；
++- 无法合并：如实写诊断码到 work_dir/merge_report.json 并告警，保留原始子模型，绝不冒充已合并。
+ """
+ from __future__ import annotations
+ 
++import json
+ import logging
+ import shutil
+ import subprocess
+@@ -93,16 +100,81 @@ def run_colmap(work_dir: Path, image_dir: Path, use_gpu: bool = True, matcher: s
+             tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-30:])
+             raise RuntimeError(f"COLMAP {name} 失败（exit={result.returncode}）：\n{tail}")
+ 
+-    # mapper 输出 sparse/0；校验
+-    model_dir = sparse_dir / "0"
+-    if not (model_dir / "images.bin").exists():
+-        # mapper 可能给出多个模型，取 0；若无则说明配准失败（常见：照片重叠不足）
+-        models = [d for d in sparse_dir.iterdir() if d.is_dir()] if sparse_dir.exists() else []
+-        if not models:
+-            raise RuntimeError(
+-                "COLMAP 未能配准任何相机（sparse/0 为空）。常见原因：照片重叠不足、运动模糊、纯色墙面。"
+-                "建议环绕拍摄并保证相邻照片 60%+ 重叠。"
+-            )
+-        model_dir = models[0]
+-    log.info("COLMAP 完成：%s", model_dir)
++    # mapper 输出 sparse/0..N；收集所有含注册图像的子模型，自动合并后再返回
++    models = (
++        sorted(
++            (d for d in sparse_dir.iterdir() if d.is_dir() and (d / "images.bin").exists()),
++            key=lambda p: p.name,
++        )
++        if sparse_dir.exists()
++        else []
++    )
++    if not models:
++        raise RuntimeError(
++            "COLMAP 未能配准任何相机（sparse/0 为空）。常见原因：照片重叠不足、运动模糊、纯色墙面。"
++            "建议环绕拍摄并保证相邻照片 60%+ 重叠。"
++        )
++    report = _merge_models(sparse_dir, models, work_dir)
++    model_dir = sparse_dir / "0" if (sparse_dir / "0" / "images.bin").exists() else models[0]
++    log.info("COLMAP 完成：%s（合并状态：%s）", model_dir, report["status"])
+     return model_dir
++
++
++def _merge_models(sparse_dir: Path, models: list, work_dir: Path) -> dict:
++    """多子模型自动合并；结果与诊断码写 work_dir/merge_report.json（如实，不冒充）。
++
++    成功：原始子模型移入 sparse/raw/<原名>，合并结果放 sparse/0。
++    失败：保留原始子模型不动，报告携带 MergeError 诊断码，注册率按 sparse/0 如实评估。
++    """
++    report: dict = {
++        "schema": "miniverse.colmap-merge.v1",
++        "models": [str(m.relative_to(work_dir)) for m in models],
++    }
++    try:
++        from app.miniature import sfm_io  # 延迟导入：find_colmap 等不依赖 numpy
++    except ImportError as e:
++        report.update(status="MERGE_UNAVAILABLE", message=f"numpy 不可用，无法执行合并：{e}")
++        log.warning("COLMAP 子模型合并不可用：%s", e)
++        _write_merge_report(work_dir, report)
++        return report
++
++    if len(models) == 1:
++        report.update(
++            status=sfm_io.MERGE_SINGLE_MODEL,
++            message="mapper 只产出一个子模型，无需合并",
++            registered=len(sfm_io.read_images_bin(models[0] / "images.bin")),
++        )
++        _write_merge_report(work_dir, report)
++        return report
++
++    tmp = sparse_dir / "merged_tmp"
++    try:
++        if tmp.exists():
++            shutil.rmtree(tmp)  # 仅清理本函数自己的临时目录
++        merge_rep = sfm_io.merge_sparse_models(models, tmp)
++        raw = sparse_dir / "raw"
++        raw.mkdir(exist_ok=True)
++        for m in models:
++            shutil.move(str(m), str(raw / m.name))
++        shutil.move(str(tmp), str(sparse_dir / "0"))
++        report.update(merge_rep)
++        report["raw_models"] = str(raw.relative_to(work_dir))
++        log.info(
++            "COLMAP 子模型合并成功：%d 个子模型 → 注册 %d 张（各子模型：%s）",
++            len(models), merge_rep["registered_merged"],
++            [m["registered"] for m in merge_rep["models"]],
++        )
++    except sfm_io.MergeError as e:
++        report.update(status=e.code, message=str(e))
++        log.warning(
++            "COLMAP 子模型无法合并（%s）：%s。保留原始子模型，注册率按 sparse/0 如实评估，不冒充已合并。",
++            e.code, e,
++        )
++    _write_merge_report(work_dir, report)
++    return report
++
++
++def _write_merge_report(work_dir: Path, report: dict) -> None:
++    (work_dir / "merge_report.json").write_text(
++        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
++    )
+diff --git a/services/reconstruction/app/miniature/tests/test_sfm_merge.py b/services/reconstruction/app/miniature/tests/test_sfm_merge.py
+new file mode 100644
+index 0000000..c84ab2b
+--- /dev/null
++++ b/services/reconstruction/app/miniature/tests/test_sfm_merge.py
+@@ -0,0 +1,489 @@
++"""T-700007 子模型合并单元测试（标准库 unittest，不依赖 pytest）。
++
++跑法（仓库根）：
++  python -m unittest discover -s services/reconstruction/app/miniature/tests -t services/reconstruction
++
++合成夹具自造：9 台环绕相机 + 55 个 3D 点，分裂成两个共享 3 张图像的子模型，
++B 模型整体施加已知相似变换（尺度 1.7 + 绕 z 转 30° + 平移）。合并必须恢复参考系。
++全部数据为程序生成（synthetic），不代表真实重建。
++"""
++from __future__ import annotations
++
++import inspect
++import json
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++import numpy as np
++
++REPO = Path(__file__).resolve().parents[5]
++sys.path.insert(0, str(REPO / "services" / "reconstruction"))
++
++from app.miniature import contracts as C  # noqa: E402
++from app.miniature import sfm_io as S  # noqa: E402
++from app.pipeline import colmap as colmap_mod  # noqa: E402
++
++# B 模型相对参考系的真实相似变换（合成真值，合并后必须恢复）
++SCALE = 1.7
++_ang = np.deg2rad(30.0)
++ROT = np.array([[np.cos(_ang), -np.sin(_ang), 0], [np.sin(_ang), np.cos(_ang), 0], [0, 0, 1.0]])
++TRANS = np.array([2.0, -1.0, 0.5])
++
++
++def _look_at(center: np.ndarray, target: np.ndarray = np.array([0.0, 0.0, 0.8])) -> np.ndarray:
++    up = np.array([0.0, 0.0, 1.0])
++    fwd = target - center
++    fwd /= np.linalg.norm(fwd)
++    right = np.cross(fwd, up)
++    right /= np.linalg.norm(right)
++    down = np.cross(fwd, right)
++    return np.stack([right, down, fwd])
++
++
++def _pose(center: np.ndarray) -> dict:
++    R = _look_at(center)
++    return {"qvec": S.rotmat2qvec(R).tolist(), "tvec": (-R @ center).tolist()}
++
++
++def _truth(n: int = 9):
++    """n 台环绕相机（半径 3，高 1.5）+ 55 个随机点。返回 (cams, images, points_xyz)。"""
++    cams = {1: {"camera_id": 1, "model_id": 1, "width": 800, "height": 600,
++                "params": [700.0, 700.0, 400.0, 300.0]}}
++    imgs = []
++    for i in range(n):
++        ang = 2 * np.pi * i / n
++        center = np.array([3 * np.cos(ang), 3 * np.sin(ang), 1.5])
++        imgs.append({"id": i + 1, "camera_id": 1, "name": f"img_{i + 1:02d}.jpg",
++                     "center": center.tolist(), **_pose(center)})
++    rng = np.random.default_rng(7)
++    pts = rng.uniform([-1, -1, 0], [1, 1, 2], (55, 3))
++    return cams, imgs, pts
++
++
++def _make_model(directory: Path, cams: dict, imgs: list, xyz: np.ndarray, id_base: int,
++                rng_seed: int = 11) -> None:
++    """写一个自洽子模型：track 引用本模型 image id，points2D 引用本模型 point3D_id。"""
++    directory.mkdir(parents=True, exist_ok=True)
++    n = len(xyz)
++    ids = np.arange(id_base, id_base + n, dtype=np.uint64)
++    timg, tp2d = [], []
++    for j in range(n):
++        timg.append(np.array([(j % len(imgs)) + 1, ((j + 2) % len(imgs)) + 1], dtype=np.int64))
++        tp2d.append(np.array([0, 1], dtype=np.int64))
++    rng = np.random.default_rng(rng_seed)
++    out_imgs = []
++    for im in imgs:
++        mask = [j for j in range(n) if im["id"] in timg[j]]
++        out_imgs.append({
++            **im,
++            "points2d_xy": rng.uniform(0, 800, (len(mask), 2)),
++            "points2d_point3d_ids": ids[np.asarray(mask, dtype=np.int64)] if mask else np.zeros(0, np.uint64),
++        })
++    S.write_cameras_bin(directory / "cameras.bin", cams)
++    S.write_images_bin(directory / "images.bin", out_imgs)
++    S.write_points3d_bin(directory / "points3D.bin", {
++        "n": n, "ids": ids, "xyz": xyz,
++        "rgb": np.full((n, 3), 128, dtype=np.uint8), "error": np.full(n, 0.5),
++        "track_image_ids": timg, "track_point2d_idx": tp2d,
++    })
++
++
++def _transformed(imgs: list, xyz: np.ndarray):
++    """把参考系真值施加已知相似变换，得到 B 模型真值。"""
++    out = []
++    for im in imgs:
++        R = S.qvec2rotmat(np.asarray(im["qvec"]))
++        center = -R.T @ np.asarray(im["tvec"])
++        center2 = SCALE * (ROT @ center) + TRANS
++        R2 = R @ ROT.T
++        out.append({**im, "qvec": S.rotmat2qvec(R2).tolist(), "tvec": (-R2 @ center2).tolist(),
++                    "center": center2.tolist()})
++    return out, SCALE * (xyz @ ROT.T) + TRANS
++
++
++def _two_models(root: Path):
++    """A=图像1..6+点0..29；B=图像4..9+点30..54（B 已施加相似变换）。共享 img_04..06。"""
++    cams, imgs, pts = _truth()
++    a = root / "sparse" / "0"
++    b = root / "sparse" / "1"
++    _make_model(a, cams, imgs[0:6], pts[0:30], id_base=101)
++    b_imgs, b_pts = _transformed(imgs[3:9], pts[30:55])
++    for k, im in enumerate(b_imgs):
++        im["id"] = k + 1  # B 有自己的 image id 空间
++    _make_model(b, cams, b_imgs, b_pts, id_base=201, rng_seed=12)
++    return a, b, imgs, pts
++
++
++class TestBinaryRoundtrip(unittest.TestCase):
++    def test_roundtrip_with_large_uint64_ids(self):
++        cams, imgs, pts = _truth(3)
++        big = np.array([2**63 + 5, 7, 2**64 - 1], dtype=np.uint64)  # 含无效 id 位模式
++        for im in imgs:
++            im["points2d_xy"] = np.array([[1.5, 2.5], [3.0, 4.0]])
++            im["points2d_point3d_ids"] = big[:2]
++        with tempfile.TemporaryDirectory() as td:
++            d = Path(td)
++            _make_model(d, cams, imgs, pts[:3], id_base=101)
++            # 覆写 images.bin 以携带大 uint64 id
++            S.write_images_bin(d / "images.bin", imgs)
++            rc = S.read_cameras_bin(d / "cameras.bin")
++            ri = S.read_images_bin(d / "images.bin", with_points2d=True)
++            rp = S.read_points3d_bin(d / "points3D.bin", with_tracks=True)
++            self.assertEqual(rc[1]["params"], cams[1]["params"])
++            self.assertEqual([x["name"] for x in ri], [x["name"] for x in imgs])
++            np.testing.assert_allclose(ri[0]["points2d_xy"], imgs[0]["points2d_xy"])
++            np.testing.assert_array_equal(ri[0]["points2d_point3d_ids"], big[:2])
++            np.testing.assert_allclose(rp["xyz"], pts[:3])
++            np.testing.assert_array_equal(rp["track_image_ids"][0], [1, 3])
++            self.assertEqual(rp["n"], 3)
++
++    def test_rotmat_qvec_roundtrip(self):
++        rng = np.random.default_rng(3)
++        for _ in range(20):
++            center = rng.uniform(-5, 5, 3)
++            center[2] = abs(center[2]) + 0.5
++            R = _look_at(center)
++            q = S.rotmat2qvec(R)
++            np.testing.assert_allclose(S.qvec2rotmat(q), R, atol=1e-9)
++            self.assertAlmostEqual(float(np.linalg.norm(q)), 1.0, places=9)
++
++
++class TestMerge(unittest.TestCase):
++    def test_merge_increases_registration(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, b, _, _ = _two_models(root)
++            out = root / "merged"
++            rep = S.merge_sparse_models([a, b], out)
++            merged = S.read_images_bin(out / "images.bin")
++            self.assertEqual(rep["status"], S.MERGE_OK)
++            self.assertEqual(len(merged), 9)
++            self.assertGreater(len(merged), len(S.read_images_bin(a / "images.bin")))
++            self.assertGreater(len(merged), len(S.read_images_bin(b / "images.bin")))
++            self.assertEqual({im["name"] for im in merged}, {f"img_{i:02d}.jpg" for i in range(1, 10)})
++            self.assertEqual(rep["registered_merged"], 9)
++            self.assertEqual(rep["points_merged"], 55)
++            self.assertEqual(rep["shared_images"][str(b)], 3)
++
++    def test_merge_recovers_reference_frame(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, b, truth_imgs, _ = _two_models(root)
++            out = root / "merged"
++            rep = S.merge_sparse_models([a, b], out)
++            merged = {im["name"]: im for im in S.read_images_bin(out / "images.bin")}
++            # B 独有图像：合并后中心必须回到参考系真值
++            for i in (6, 7, 8):
++                np.testing.assert_allclose(merged[f"img_{i + 1:02d}.jpg"]["center"],
++                                           truth_imgs[i]["center"], atol=1e-6)
++            # 共享图像：保留参考模型位姿（逐位相等）
++            ref_imgs = {im["name"]: im for im in S.read_images_bin(a / "images.bin")}
++            for nm in ("img_04.jpg", "img_05.jpg", "img_06.jpg"):
++                np.testing.assert_allclose(merged[nm]["qvec"], ref_imgs[nm]["qvec"], atol=0, rtol=0)
++            al = rep["alignments"][0]
++            # 报告的是 B→参考系 的变换：B = SCALE·ROT·A + TRANS ⇒ 逆变换如下
++            self.assertAlmostEqual(al["scale"], 1.0 / SCALE, places=6)
++            np.testing.assert_allclose(al["rotation"], ROT.T, atol=1e-6)
++            np.testing.assert_allclose(al["translation"], -ROT.T @ TRANS / SCALE, atol=1e-6)
++            self.assertLess(al["rms_residual"], 1e-6)
++
++    def test_merge_tracks_and_points2d_remapped(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, b, _, _ = _two_models(root)
++            out = root / "merged"
++            S.merge_sparse_models([a, b], out)
++            imgs = S.read_images_bin(out / "images.bin", with_points2d=True)
++            pts = S.read_points3d_bin(out / "points3D.bin", with_tracks=True)
++            valid_img_ids = {im["id"] for im in imgs}
++            valid_pt_ids = set(pts["ids"].tolist())
++            for t in pts["track_image_ids"]:
++                self.assertTrue(set(t.tolist()) <= valid_img_ids)
++            for im in imgs:
++                for v in im["points2d_point3d_ids"].tolist():
++                    self.assertIn(v, valid_pt_ids)
++            self.assertEqual(len(imgs), 9)
++            self.assertEqual(pts["n"], 55)
++
++    def test_merge_deterministic(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, b, _, _ = _two_models(root)
++            o1, o2 = root / "m1", root / "m2"
++            S.merge_sparse_models([a, b], o1)
++            S.merge_sparse_models([a, b], o2)
++            for nm in ("cameras.bin", "images.bin", "points3D.bin"):
++                self.assertEqual((o1 / nm).read_bytes(), (o2 / nm).read_bytes())
++
++
++class TestMergeDiagnostics(unittest.TestCase):
++    def test_no_shared_images(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, b, _, _ = _two_models(root)
++            # 把 B 的图像全部改名 → 无共享
++            imgs = S.read_images_bin(b / "images.bin", with_points2d=True)
++            for im in imgs:
++                im["name"] = "other_" + im["name"]
++            S.write_images_bin(b / "images.bin", imgs)
++            out = root / "merged"
++            with self.assertRaises(S.MergeError) as ctx:
++                S.merge_sparse_models([a, b], out)
++            self.assertEqual(ctx.exception.code, S.MERGE_NO_SHARED_IMAGES)
++            self.assertFalse(out.exists() and any(out.iterdir()))
++
++    def test_insufficient_shared(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            cams, imgs, pts = _truth()
++            a, b = root / "a", root / "b"
++            _make_model(a, cams, imgs[0:6], pts[0:30], 101)
++            b_imgs, b_pts = _transformed(imgs[4:9], pts[30:55])  # 共享仅 img_05、img_06
++            for k, im in enumerate(b_imgs):
++                im["id"] = k + 1
++            _make_model(b, cams, b_imgs, b_pts, 201)
++            with self.assertRaises(S.MergeError) as ctx:
++                S.merge_sparse_models([a, b], root / "m")
++            self.assertEqual(ctx.exception.code, S.MERGE_INSUFFICIENT_SHARED)
++
++    def test_single_model(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, _, _, _ = _two_models(root)
++            with self.assertRaises(S.MergeError) as ctx:
++                S.merge_sparse_models([a], root / "m")
++            self.assertEqual(ctx.exception.code, S.MERGE_SINGLE_MODEL)
++
++    def test_degenerate_collinear_centers(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            cams = {1: {"camera_id": 1, "model_id": 1, "width": 800, "height": 600,
++                        "params": [700.0, 700.0, 400.0, 300.0]}}
++            imgs = []
++            for i in range(3):
++                center = np.array([float(i), 0.0, 1.5])  # 共线
++                imgs.append({"id": i + 1, "camera_id": 1, "name": f"c{i}.jpg", **_pose(center)})
++            pts = np.zeros((4, 3))
++            a, b = root / "a", root / "b"
++            _make_model(a, cams, imgs, pts, 101)
++            # 统一平移保持共线：t' = t - R·d（逐图 R 不同，但中心偏移一致）
++            d = np.array([0.0, 0.0, 0.5])
++            b_imgs = []
++            for im in imgs:
++                R = S.qvec2rotmat(np.asarray(im["qvec"]))
++                b_imgs.append({**im, "tvec": (np.asarray(im["tvec"]) - R @ d).tolist()})
++            _make_model(b, cams, b_imgs, pts, 201)
++            with self.assertRaises(S.MergeError) as ctx:
++                S.merge_sparse_models([a, b], root / "m")
++            self.assertEqual(ctx.exception.code, S.MERGE_DEGENERATE_GEOMETRY)
++
++    def test_alignment_failed_not_same_scene(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            cams, imgs, pts = _truth(4)
++            a, b = root / "a", root / "b"
++            _make_model(a, cams, imgs, pts[:10], 101)
++            # B 的共享中心施加逐图不同的大偏移 → 不是相似变换，残差必超限
++            offsets = np.array([[0, 0, 0], [1.5, 0, 0], [0, 1.5, 0], [0, 0, 1.5]], dtype=float)
++            b_imgs = []
++            for im, off in zip(imgs, offsets):
++                center = np.asarray(im["center"]) + off
++                b_imgs.append({**im, **_pose(center)})
++            _make_model(b, cams, b_imgs, pts[10:20], 201)
++            with self.assertRaises(S.MergeError) as ctx:
++                S.merge_sparse_models([a, b], root / "m")
++            self.assertEqual(ctx.exception.code, S.MERGE_ALIGNMENT_FAILED)
++
++
++class TestRegistrationRatio(unittest.TestCase):
++    def test_denominator_is_processed_images_not_uploads(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, _, _, _ = _two_models(root)
++            processed = root / "processed" / "task-x" / "images"
++            uploads = root / "uploads"
++            processed.mkdir(parents=True)
++            uploads.mkdir()
++            for i in range(9):
++                (processed / f"img_{i + 1:02d}.jpg").write_bytes(b"x")
++            (processed / "notes.txt").write_bytes(b"x")  # 非图片不计
++            (processed / "sub").mkdir()  # 目录不计
++            for i in range(3):
++                (uploads / f"u{i}.jpg").write_bytes(b"x")  # uploads 不得作分母
++            r = S.registration_ratio(a, processed)
++            self.assertEqual(r["registered"], 6)
++            self.assertEqual(r["total"], 9)
++            self.assertAlmostEqual(r["ratio"], 6 / 9)
++            self.assertEqual(r["denominator_source"], str(processed))
++
++
++class TestManifestIdContentHash(unittest.TestCase):
++    def test_manifest_id_changes_when_merge_changes_coverage(self):
++        def manifest(n_registered: int) -> C.InputManifest:
++            return C.InputManifest(
++                scene_key="k", scene_path="processed/task-x",
++                coverage=C.Coverage(n_registered=n_registered),
++                colmap={"registered": n_registered, "merged": n_registered > 6},
++                synthetic=True,
++            ).finalize()
++
++        single, merged = manifest(6), manifest(9)
++        self.assertNotEqual(single.manifest_id, merged.manifest_id)
++        self.assertEqual(C.validate_manifest(single.as_dict()), [])
++        self.assertEqual(C.validate_manifest(merged.as_dict()), [])
++        # 内容不变 → 哈希不变（确定性）
++        self.assertEqual(manifest(9).manifest_id, merged.manifest_id)
++
++    def test_manifest_id_tracks_actual_model_reads(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            a, b, _, _ = _two_models(root)
++            out = root / "merged"
++            S.merge_sparse_models([a, b], out)
++            n_single = len(S.read_images_bin(a / "images.bin"))
++            n_merged = len(S.read_images_bin(out / "images.bin"))
++            m1 = C.InputManifest("k", "p", coverage=C.Coverage(n_registered=n_single), synthetic=True).finalize()
++            m2 = C.InputManifest("k", "p", coverage=C.Coverage(n_registered=n_merged), synthetic=True).finalize()
++            self.assertNotEqual(m1.manifest_id, m2.manifest_id)
++
++
++class TestF1014582ScenarioSynthetic(unittest.TestCase):
++    """合成复现 f1014582 的历史分裂比例（60/104 → 102/104），验证机制与分母口径。
++
++    明确声明：这是程序生成的合成场景，不是真实 f1014582 数据。
++    真实数据的两个对照数字（2026-11-12 实测）见 docs/miniature/THRESHOLDS.md
++    与 DATA-PROVENANCE.md；本机无 COLMAP 且无该任务原始数据，无法复测。
++    """
++
++    def test_split_104_photos_60_vs_102(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            n = 104
++            cams = {1: {"camera_id": 1, "model_id": 1, "width": 800, "height": 600,
++                        "params": [700.0, 700.0, 400.0, 300.0]}}
++            imgs = []
++            for i in range(n):
++                ang = 2 * np.pi * i / n
++                center = np.array([3 * np.cos(ang), 3 * np.sin(ang), 1.5 + 0.3 * np.sin(3 * ang)])
++                imgs.append({"id": i + 1, "camera_id": 1, "name": f"img_{i + 1:03d}.jpg",
++                             "center": center.tolist(), **_pose(center)})
++            rng = np.random.default_rng(17)
++            pts = rng.uniform([-1, -1, 0], [1, 1, 2], (200, 3))
++            a, b = root / "sparse" / "0", root / "sparse" / "1"
++            _make_model(a, cams, imgs[0:60], pts[0:100], 1001)
++            b_imgs, b_pts = _transformed(imgs[57:102], pts[100:200])  # 45 张，共享 3 张 → 并集 102
++            for k, im in enumerate(b_imgs):
++                im["id"] = k + 1
++            _make_model(b, cams, b_imgs, b_pts, 2001, rng_seed=18)
++            processed = root / "processed" / "f1014582-synthetic" / "images"
++            processed.mkdir(parents=True)
++            for i in range(n):
++                (processed / f"img_{i + 1:03d}.jpg").write_bytes(b"x")
++
++            r_single = S.registration_ratio(a, processed)
++            self.assertEqual((r_single["registered"], r_single["total"]), (60, 104))
++            self.assertAlmostEqual(r_single["ratio"], 60 / 104, places=4)
++            self.assertLess(r_single["ratio"], C.THRESHOLDS["min_registered_ratio"])  # 触发 warn 线
++
++            out = root / "merged"
++            rep = S.merge_sparse_models([a, b], out)
++            r_merged = S.registration_ratio(out, processed)
++            self.assertEqual(rep["status"], S.MERGE_OK)
++            self.assertEqual((r_merged["registered"], r_merged["total"]), (102, 104))
++            self.assertAlmostEqual(r_merged["ratio"], 102 / 104, places=4)
++            self.assertGreaterEqual(r_merged["ratio"], 0.98)
++
++
++class TestRunColmapIntegration(unittest.TestCase):
++    """mock COLMAP 二进制：mapper 阶段写入合成子模型，验证 run_colmap 的合并集成。"""
++
++    def _fake_run(self, root: Path, models: str):
++        def run(cmd, **kwargs):
++            stage = cmd[1]
++            if stage == "mapper":
++                wd = Path(kwargs["cwd"])
++                if models == "two":
++                    _two_models(wd)
++                elif models == "disjoint":
++                    a, b, _, _ = _two_models(wd)
++                    imgs = S.read_images_bin(b / "images.bin", with_points2d=True)
++                    for im in imgs:
++                        im["name"] = "other_" + im["name"]
++                    S.write_images_bin(b / "images.bin", imgs)
++                elif models == "single":
++                    cams, imgs, pts = _truth()
++                    _make_model(wd / "sparse" / "0", cams, imgs[0:6], pts[0:30], 101)
++                # models == "none"：mapper 不产出任何模型
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++        return run
++
++    def _run(self, root: Path, models: str) -> Path:
++        with mock.patch.object(colmap_mod, "find_colmap", return_value="colmap"), \
++             mock.patch.object(colmap_mod.subprocess, "run", side_effect=self._fake_run(root, models)):
++            return colmap_mod.run_colmap(root, root / "images")
++
++    def test_multi_model_merged_into_sparse0(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            model_dir = self._run(root, "two")
++            self.assertEqual(model_dir, root / "sparse" / "0")
++            self.assertEqual(len(S.read_images_bin(model_dir / "images.bin")), 9)
++            self.assertTrue((root / "sparse" / "raw" / "0" / "images.bin").exists())
++            self.assertTrue((root / "sparse" / "raw" / "1" / "images.bin").exists())
++            rep = json.loads((root / "merge_report.json").read_text(encoding="utf-8"))
++            self.assertEqual(rep["status"], S.MERGE_OK)
++            self.assertEqual(rep["registered_merged"], 9)
++            self.assertEqual([m["registered"] for m in rep["models"]], [6, 6])
++
++    def test_unmergeable_reports_diagnostic_not_fake_merge(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            model_dir = self._run(root, "disjoint")
++            self.assertEqual(model_dir, root / "sparse" / "0")
++            self.assertEqual(len(S.read_images_bin(model_dir / "images.bin")), 6)  # 原样，未冒充
++            self.assertTrue((root / "sparse" / "1" / "images.bin").exists())
++            self.assertFalse((root / "sparse" / "raw").exists())
++            rep = json.loads((root / "merge_report.json").read_text(encoding="utf-8"))
++            self.assertEqual(rep["status"], S.MERGE_NO_SHARED_IMAGES)
++            self.assertIn("无共享图像", rep["message"])
++
++    def test_single_model_report(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            model_dir = self._run(root, "single")
++            self.assertEqual(model_dir, root / "sparse" / "0")
++            rep = json.loads((root / "merge_report.json").read_text(encoding="utf-8"))
++            self.assertEqual(rep["status"], S.MERGE_SINGLE_MODEL)
++            self.assertEqual(rep["registered"], 6)
++
++    def test_no_model_raises(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            with self.assertRaises(RuntimeError):
++                self._run(root, "none")
++
++    def test_cache_early_return_skips_colmap(self):
++        with tempfile.TemporaryDirectory() as td:
++            root = Path(td)
++            cams, imgs, pts = _truth()
++            _make_model(root / "sparse" / "0", cams, imgs[0:6], pts[0:30], 101)
++            (root / "input_fingerprint.json").write_text("{}", encoding="utf-8")
++            with mock.patch.object(colmap_mod, "find_colmap", return_value="colmap"), \
++                 mock.patch.object(colmap_mod.subprocess, "run",
++                                   side_effect=AssertionError("缓存命中不应调用 COLMAP")):
++                model_dir = colmap_mod.run_colmap(root, root / "images")
++            self.assertEqual(model_dir, root / "sparse" / "0")
++
++    def test_worker_call_signature_unchanged(self):
++        sig = inspect.signature(colmap_mod.run_colmap)
++        self.assertEqual(list(sig.parameters), ["work_dir", "image_dir", "use_gpu", "matcher"])
++        self.assertIs(sig.parameters["use_gpu"].default, True)
++        self.assertEqual(sig.parameters["matcher"].default, "exhaustive")
++
++
++if __name__ == "__main__":
++    unittest.main()
+\ No newline at end of file

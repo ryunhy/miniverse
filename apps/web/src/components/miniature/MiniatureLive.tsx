@@ -37,15 +37,25 @@ export default function MiniatureLive({
   const [view, setView] = useState<MiniatureView | null>(initial ?? null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const qs = fixture ? "?fixture=1" : "";
-    const res = await fetch(`/api/reconstructions/${encodeURIComponent(taskId)}/miniature${qs}`, {
-      cache: "no-store",
-    });
-    if (!res.ok) return;
-    const body = (await res.json()) as { view: MiniatureView };
-    setView(body.view);
+    try {
+      const res = await fetch(`/api/reconstructions/${encodeURIComponent(taskId)}/miniature${qs}`, {
+        cache: "no-store",
+      });
+      // 404/409/422 的产物核对结果也带 view，必须更新详情和阶段状态。
+      const body = (await res.json().catch(() => null)) as { view?: MiniatureView; error?: string } | null;
+      if (body?.view) {
+        setView(body.view);
+        setLoadError(null);
+      } else {
+        setLoadError(body?.error ?? `读取任务状态失败（HTTP ${res.status}）`);
+      }
+    } catch {
+      setLoadError("读取任务状态失败，请刷新后重试。");
+    }
   }, [taskId, fixture]);
 
   useEffect(() => {
@@ -70,7 +80,7 @@ export default function MiniatureLive({
   };
 
   if (!view) {
-    return <div className="rounded-lg border border-slate-800 px-3 py-6 text-xs text-slate-500">正在读取任务状态…</div>;
+    return <div className="rounded-lg border border-slate-800 px-3 py-6 text-xs text-slate-500">{loadError ?? "正在读取任务状态…"}</div>;
   }
 
   const id = encodeURIComponent(view.taskId);
@@ -85,6 +95,7 @@ export default function MiniatureLive({
         </div>
       )}
 
+      {loadError && <div role="alert" className="text-sm text-rose-200">{loadError}</div>}
       {err && <div className="rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-200">{err}</div>}
 
       <div className="grid gap-4 lg:grid-cols-[1fr_1.4fr]">

@@ -1,0 +1,42 @@
+# 证据可达性审计（T-700015）
+# 时间: 2026-11-19T04:28:23Z
+# 机器: Windows 10 26200 / Node v24.21.0 / npm 11.19.0
+# HEAD: d69405aaec5834ba36dd66f6c3426b1b5b9735f9（工作树含并行卡未提交改动 45 项）
+# 方法: 对每个路径执行 test -e，输出 REACHABLE / MISSING
+
+MISSING    outputs/2026-11-14/pending-inventory/outputs/PENDING.md
+MISSING    outputs/acceptance-hardening/acceptance-hardening-2026-11-14.md
+MISSING    outputs/consistency-loss/baseline/depth-consistency.json
+REACHABLE  docs/miniature/CONTRACT.md
+REACHABLE  docs/miniature/THRESHOLDS.md
+REACHABLE  docs/miniature/DELIVERY.md
+REACHABLE  docs/furniture/dimension-spec.md
+REACHABLE  docs/miniature/SCALE-CALIBRATION.md
+REACHABLE  HANDOFF.md
+REACHABLE  PROGRESS.md
+REACHABLE  TEST_REPORT.md
+REACHABLE  NEXT-STEPS.md
+REACHABLE  docs/miniature/RUNBOOK.md
+REACHABLE  docs/miniature/BENCHMARK.md
+REACHABLE  docs/miniature/DATA-PROVENANCE.md
+MISSING    workspaces/700072/artifacts
+MISSING    tools/preview_scene_manifest.py
+REACHABLE  docs/evidence/miniature-three-states
+REACHABLE  docs/evidence/cache-slots
+REACHABLE  docs/evidence/scene-manifest-client
+REACHABLE  docs/evidence/sample-scene-fixture
+REACHABLE  docs/evidence/sfm-merge
+REACHABLE  data/reconstructions/sample/scene.json
+MISSING    outputs/integration/sample
+
+# git 跟踪状态（REACHABLE 项是否已入库）:
+docs/evidence/miniature-three-states  tracked_files=10
+docs/evidence/cache-slots  tracked_files=0
+docs/evidence/scene-manifest-client  tracked_files=6
+docs/evidence/sample-scene-fixture  tracked_files=0
+docs/evidence/sfm-merge  tracked_files=0
+
+# .gitignore 相关行:
+49:/data/
+50:/outputs/
+53:/_pending-delete-*/
