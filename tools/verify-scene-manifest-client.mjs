@@ -2,17 +2,22 @@
 // 刷新恢复 / 移除家具后的背景检查。
 //
 // 用法：
-//   1) npm run build && (cd apps/web && npx next start -p 3211)
-//   2) node tools/verify-scene-manifest-client.mjs
+//   1) npm ci && node tools/generate-sample-scene.mjs   # 干净克隆无私有数据时，先生成合成样例
+//   2) npm run build && (cd apps/web && npx next start -p 3211)
+//   3) node tools/verify-scene-manifest-client.mjs
 //
-// 前提：data/reconstructions/sample/ 下有 scene.json + room/walls/floor/sofa.glb
-//（由集成批次交付；data/ 不入库，本脚本只消费不生成）。
+// 前提：data/reconstructions/sample/ 下有 scene.json + room/walls/floor/sofa.glb。
+// 两种来源：集成批次交付的真实产物，或 tools/generate-sample-scene.mjs 程序生成的
+// 合成样例（synthetic=true）。本脚本读取清单的 synthetic 标志并在报告与输出中如实声明；
+// 合成样例的结果只证明客户端契约，不代表真实重建质量。
 //
 // 产物：docs/evidence/scene-manifest-client/{client-interaction.json,*.png}
+// （合成样例建议用 OUT_DIR 指向独立目录，避免覆盖真实批次的历史证据）
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BASE = process.env.TARGET_URL || "http://127.0.0.1:3211";
 const SCENE_ID = process.env.SCENE_ID || "sample";
@@ -20,6 +25,25 @@ const CDP_PORT = Number(process.env.CDP_PORT || 9344);
 const OUT = path.resolve(process.env.OUT_DIR || "docs/evidence/scene-manifest-client");
 const CHROME =
   process.env.CHROME_PATH || "C:/Program Files/Google/Chrome/Application/chrome.exe";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+/** 读取场景清单的来源声明（与 apps/web/src/lib/server/paths.ts 同一数据目录约定）。 */
+function readSceneOrigin() {
+  const dataDir = process.env.MINIVERSE_DATA_DIR || path.join(ROOT, "data");
+  const manifestPath = path.join(dataDir, "reconstructions", SCENE_ID, "scene.json");
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    return {
+      manifest_path: manifestPath,
+      synthetic: m.synthetic === true,
+      note: typeof m.note === "string" ? m.note : null,
+      generator: m.generator ?? null,
+    };
+  } catch {
+    return { manifest_path: manifestPath, synthetic: false, note: null, generator: null };
+  }
+}
 
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -140,10 +164,15 @@ async function main() {
   await cdp.send("Runtime.enable");
 
   const url = `${BASE}/reconstructions/${SCENE_ID}`;
+  const origin = readSceneOrigin();
+  if (origin.synthetic) {
+    console.warn("⚠ 本次消费的是程序生成样例（synthetic=true），非真实重建；结果只证明客户端契约，不代表真实场景质量。");
+  }
   const report = {
     tool: "tools/verify-scene-manifest-client.mjs",
     target_url: url,
     started_at: new Date().toISOString(),
+    data_origin: origin,
     steps: [],
     verdict: {},
   };
@@ -180,6 +209,8 @@ async function main() {
       undo_button: Boolean(document.querySelector('[data-testid="undo"]')),
       save_button: Boolean(document.querySelector('[data-testid="save-layout"]')),
       hide_buttons: document.querySelectorAll('[data-testid^="toggle-obj-"]').length,
+      // 合成样例必须在页面上看得见「程序生成 / 非真实重建」标注（对象列表常驻显示清单 label）
+      synthetic_annotation_visible: text.includes('程序生成') && text.includes('非真实重建'),
     };
   })()`);
   report.probe = ui;
@@ -418,11 +449,17 @@ async function main() {
     object_list_ui: ui.mode_buttons.length === 3,
     selection_via: selectionVia,
     transform_via: transformVia,
+    // 数据来源如实声明：合成样例必须标 synthetic，且页面上看得见标注
+    synthetic: origin.synthetic,
+    synthetic_annotation_visible: origin.synthetic ? ui.synthetic_annotation_visible : null,
   };
   report.reading =
     "真实浏览器（Chrome headless + CDP）在 /reconstructions/" +
     SCENE_ID +
-    " 上消费 scene-manifest v1：画布点选对象、坐标轴/输入框平移、撤销回到原位且画布像素完全一致、移除家具后背景检查无新增露洞、保存后刷新布局恢复。";
+    " 上消费 scene-manifest v1：画布点选对象、坐标轴/输入框平移、撤销回到原位且画布像素完全一致、移除家具后背景检查无新增露洞、保存后刷新布局恢复。" +
+    (origin.synthetic
+      ? " ⚠ 本次场景为程序生成样例（synthetic=true，非真实重建）：以上只证明客户端交互契约可用，不代表任何真实重建的质量；背景检查数值按实际结果如实记录。"
+      : "");
 
   fs.writeFileSync(path.join(OUT, "client-interaction.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report.verdict, null, 2));
@@ -436,6 +473,10 @@ async function main() {
       v !== true,
   );
   if ((report.verdict.canvas_pixel_diff_after_undo ?? 1) !== 0) failed.push(["canvas_pixel_diff_after_undo", 1]);
+  // 合成样例若页面看不到「程序生成/非真实重建」标注，按失败处理（诚实原则）
+  if (origin.synthetic && report.verdict.synthetic_annotation_visible !== true) {
+    failed.push(["synthetic_annotation_visible", report.verdict.synthetic_annotation_visible]);
+  }
   if (failed.length) {
     console.error("未通过:", failed);
     process.exitCode = 1;

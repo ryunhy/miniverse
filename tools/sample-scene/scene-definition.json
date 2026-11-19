@@ -1,0 +1,32 @@
+{
+  "synthetic": true,
+  "note": "程序生成样例场景，非真实重建；仅供 scene-manifest v1 客户端契约验收，不得作为真实重建证据",
+  "sceneId": "sample",
+  "units": "nu",
+  "upAxis": "+Y",
+  "objects": [
+    {
+      "objectId": "obj-room",
+      "nodeName": "room",
+      "label": "房间外壳（程序生成样例·非真实重建）",
+      "role": "background"
+    },
+    { "objectId": "obj-walls", "nodeName": "walls", "label": "墙体", "role": "background" },
+    { "objectId": "obj-floor", "nodeName": "floor", "label": "地板", "role": "background" },
+    { "objectId": "obj-sofa", "nodeName": "sofa", "label": "沙发", "role": "furniture" }
+  ],
+  "geometry": {
+    "floor": [[0, -0.05, 0, 4.4, 0.1, 3.4, "#b0a898"]],
+    "walls": [
+      [0, 1.25, -1.7, 4.4, 2.5, 0.1, "#d8d2c4"],
+      [-2.2, 1.25, 0, 0.1, 2.5, 3.4, "#cfc9bb"]
+    ],
+    "sofa": [
+      [0, 0.25, 0.32, 1.8, 0.35, 0.8, "#7c90a0"],
+      [0, 0.62, -0.04, 1.8, 0.5, 0.18, "#6b8294"],
+      [-0.82, 0.52, 0.32, 0.16, 0.32, 0.8, "#6b8294"],
+      [0.82, 0.52, 0.32, 0.16, 0.32, 0.8, "#6b8294"],
+      [0, 0.46, 0.42, 1.48, 0.14, 0.55, "#8ba3b4"]
+    ]
+  }
+}
