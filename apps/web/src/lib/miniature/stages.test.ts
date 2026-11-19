@@ -94,3 +94,18 @@ test("fixture 误用为真实数据时 synthetic=false 透传（防止冒充）"
   );
   assert.equal(v.synthetic, false);
 });
+
+test("GLB 已生成但未发布时不显示旧资产的链接", () => {
+  const v = deriveMiniatureView(task({
+    status: "completed",
+    result: resultWith({ path: "glb/a.glb" }, {
+      status: "ok",
+      publish: { state: "failed", error: "磁盘空间不足" },
+      stages: { export: { state: "done" } },
+    }),
+  }));
+  assert.equal(v.ready, false);
+  assert.equal(v.glb, null);
+  assert.match(v.banner.text, /发布失败.*磁盘空间不足/);
+  assert.equal(v.stages.find((s) => s.key === "export")?.state, "failed");
+});

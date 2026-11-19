@@ -301,6 +301,10 @@ def run_miniature_only(ctx: TaskContext) -> int:
         out = _miniature_stage(ctx, report_main=False)
         st = out.get("status")
         if st in ("ok", "degraded"):
+            publish = out.get("publish") or {}
+            if publish.get("state") == "failed":
+                report("failed", publish.get("error"), out)
+                return 1
             report("completed", result=out)
             log.info("微缩重试完成：task=%s status=%s", ctx.task_id, st)
             return 0
@@ -408,6 +412,12 @@ def _miniature_stage(ctx: TaskContext, report_main: bool = True) -> dict:
     out = _miniature_payload(res, out_dir)
     out["preflight"] = pre
     out["seconds"] = round(time.time() - t0, 1)
+    # A1（卡 #700121）：跑完自动发布，不再依赖手工脚本把产物搬到网页可读位置
+    out["publish"] = _publish_miniature_preview(ctx, out)
+    if out["publish"].get("state") != "ok":
+        if out.get("glb"):
+            out["stages"]["export"] = {"state": "failed", "detail": out["publish"]["error"]}
+        log.error("微缩发布失败：task=%s error=%s", ctx.task_id, out["publish"].get("error"))
     return out
 
 
@@ -542,6 +552,91 @@ def _miniature_payload(res: dict, out_dir: Path) -> dict:
     if res.get("failed_stage"):
         out["failed_stage"] = res["failed_stage"]
     return out
+
+
+def _publish_miniature_preview(ctx: TaskContext, payload: dict) -> dict:
+    """先校验 GLB，再用原子替换清单的方式发布新版本。"""
+    import hashlib
+    import struct
+    import tempfile
+
+    scene_dir = ctx.export_dir
+    staged_files: list[Path] = []
+    try:
+        glb_info = payload.get("glb") or {}
+        src = glb_info.get("path")
+        if not src or not Path(src).is_file():
+            return {"state": "failed", "error": "微缩 GLB 产物缺失，无物可发布"}
+
+        data = Path(src).read_bytes()
+        actual_sha = hashlib.sha256(data).hexdigest()
+        expect_sha = glb_info.get("sha256")
+        if expect_sha and actual_sha != expect_sha:
+            return {"state": "failed", "error": "GLB 产物 SHA-256 与状态上报不一致"}
+
+        magic, version, total = struct.unpack_from("<III", data)
+        length, chunk_type = struct.unpack_from("<II", data, 12)
+        if magic != 0x46546C67 or version != 2 or total != len(data):
+            raise ValueError("微缩产物不是有效的 glTF 2.0 GLB")
+        if chunk_type != 0x4E4F534A or length == 0 or length % 4 or 20 + length > total:
+            raise ValueError("GLB JSON 块无效")
+        doc = json.loads(data[20 : 20 + length])
+        node_names = {n.get("name") for n in doc.get("nodes", []) if isinstance(n, dict)}
+
+        instances: list[dict] = []
+        ins_path = scene_dir / "miniature" / "instances.json"
+        if ins_path.is_file():
+            instances = json.loads(ins_path.read_text(encoding="utf-8")).get("instances") or []
+
+        objects = [
+            {"objectId": oid, "nodeName": oid}
+            for rec in instances
+            if isinstance((oid := rec.get("id")), str) and oid in node_names
+        ]
+        asset_name = f"room-{actual_sha}.glb"
+        asset_path = scene_dir / asset_name
+        manifest = {
+            "schema": "miniverse.scene-manifest.v1",
+            "sceneId": ctx.task_id,
+            "units": "nu",
+            "upAxis": "+Y",
+            "sourceFrame": {"upAxis": "+Y", "conversion": "miniature pipeline output (already Y-up)"},
+            "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "generator": "app.worker._publish_miniature_preview",
+            "synthetic": bool(payload.get("synthetic")),
+            "assets": {"scene": {"path": asset_name, "bytes": len(data), "sha256": actual_sha}},
+            "objects": objects,
+        }
+        # 旧清单始终指向它原先的资产。新资产写好之后才替换清单。
+        for target, content in (
+            (asset_path, data),
+            (scene_dir / "scene.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")),
+        ):
+            with tempfile.NamedTemporaryFile(dir=scene_dir, suffix=".tmp", delete=False) as fh:
+                staged = Path(fh.name)
+                staged_files.append(staged)
+                fh.write(content)
+            staged.replace(target)
+            staged_files.remove(staged)
+
+        log.info("微缩发布完成：task=%s GLB=%d 字节 objects=%d", ctx.task_id, len(data), len(objects))
+        return {
+            "state": "ok",
+            "roomGlb": str(asset_path),
+            "sceneJson": str(scene_dir / "scene.json"),
+            "bytes": len(data),
+            "sha256": actual_sha,
+            "objects": len(objects),
+        }
+    except Exception as e:  # noqa: BLE001 - 发布失败必须留痕
+        log.exception("微缩发布异常：task=%s", ctx.task_id)
+        return {"state": "failed", "error": f"{type(e).__name__}: {e}"}
+    finally:
+        for staged in staged_files:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                log.warning("未能清理微缩发布临时文件：%s", staged)
 
 
 def _probe_miniature_env() -> dict:
