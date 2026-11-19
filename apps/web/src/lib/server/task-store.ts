@@ -13,7 +13,9 @@ export type TaskStatus = "pending" | "processing" | "completed" | "failed" | "ca
 
 export const STATUS_FLOW: Record<TaskStatus, TaskStatus[]> = {
   // pending → completed 允许：直跑 worker（不经 worker-loop 轮询）的快速任务无中间态上报
-  pending: ["processing", "canceled", "completed"],
+  // pending → failed 允许（卡 #700127）：worker 已把 failed 写进 status.json 但派发记录
+  // 丢失（进程在首次同步前死亡/重试竞态）时，懒同步必须能落到 failed，否则任务永远 pending
+  pending: ["processing", "canceled", "completed", "failed"],
   processing: ["completed", "failed", "canceled"],
   completed: [],
   failed: ["pending", "canceled"],
