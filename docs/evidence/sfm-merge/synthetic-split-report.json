@@ -1,0 +1,79 @@
+{
+  "synthetic": true,
+  "note": "程序生成合成场景，复现 f1014582 历史分裂比例；非真实重建数据。真实对照数字（2026-11-12 实测）见 docs/miniature/THRESHOLDS.md 与 DATA-PROVENANCE.md。",
+  "scenario": {
+    "photos_on_disk": 104,
+    "model_0_registered": 60,
+    "model_1_registered": 45,
+    "shared_images": 3
+  },
+  "registration_single_sparse0": {
+    "registered": 60,
+    "total": 104,
+    "ratio": 0.5769230769230769,
+    "denominator_source": "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\processed\\f1014582-synthetic\\images"
+  },
+  "registration_merged": {
+    "registered": 102,
+    "total": 104,
+    "ratio": 0.9807692307692307,
+    "denominator_source": "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\processed\\f1014582-synthetic\\images"
+  },
+  "low_registration_warn_would_fire_on_single": true,
+  "merge_report": {
+    "status": "MERGE_OK",
+    "models": [
+      {
+        "dir": "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\sparse\\0",
+        "registered": 60,
+        "points": 100
+      },
+      {
+        "dir": "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\sparse\\1",
+        "registered": 45,
+        "points": 100
+      }
+    ],
+    "reference": "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\sparse\\0",
+    "shared_images": {
+      "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\sparse\\1": 3
+    },
+    "alignments": [
+      {
+        "model": "C:\\Users\\lenovo\\AppData\\Local\\Temp\\tmp1da3hg7f\\sparse\\1",
+        "scale": 0.5882352941176449,
+        "rotation": [
+          [
+            0.8660254037844373,
+            0.5000000000000026,
+            -1.4173071789584979e-14
+          ],
+          [
+            -0.500000000000002,
+            0.8660254037844375,
+            1.3106335786042506e-15
+          ],
+          [
+            1.294366532844211e-14,
+            6.1076506001454695e-15,
+            1.0
+          ]
+        ],
+        "translation": [
+          -0.724735769158142,
+          1.0976620022261256,
+          -0.2941176470587923
+        ],
+        "rms_residual": 5.588000014763635e-16,
+        "shared": 3
+      }
+    ],
+    "registered_merged": 102,
+    "points_merged": 200,
+    "note": "共享图像保留参考模型位姿；点云取并集不做几何去重；被合并模型在共享图像上的 2D 观测不并入。"
+  },
+  "manifest_id_single": "d7cf2d8c32fa43a4dedf337d1d3e90bf882d9696723b1b594c70aab9dabb768f",
+  "manifest_id_merged": "4244477ea5656ee72c695007e23e0e15e7f944723163cca9f36d4eb91da21b30",
+  "manifest_id_changed_by_merge": true,
+  "denominator_rule": "processed/<id>/images 图片文件数（IMAGE_EXTS 口径，与 ingest 一致），不得用 uploads"
+}
