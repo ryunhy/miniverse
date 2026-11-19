@@ -1,4 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
 import { NextResponse } from "next/server";
+import { taskDir } from "@/lib/server/paths";
 import { getTaskStore } from "@/lib/server/task-store";
 import { spawnReconstructionWorker } from "@/lib/server/worker-spawn";
 
@@ -30,7 +33,9 @@ export async function POST(_req: Request, ctx: Ctx) {
       });
     }
 
-    const retried = store.retry(id);
+    const retried = store.retry(id, () => {
+      fs.rmSync(path.join(taskDir(id), "status.json"), { force: true });
+    });
     const spawnResult = spawnReconstructionWorker(id, JSON.parse(retried.params || "{}"));
     if (!spawnResult.ok) {
       store.appendEvent(id, "warn", spawnResult.error ?? "Worker 未能启动");

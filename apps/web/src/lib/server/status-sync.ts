@@ -65,7 +65,11 @@ export function syncTaskFromWorker(taskId: string): void {
  * worker 超过该时长没有任何状态上报，且进程已消失 → 判定为异常退出。
  * 可用 MINIVERSE_STALE_MS 环境变量覆盖（毫秒，测试/真机中断演练用；卡 #700127）。
  */
-const STALE_MS = Number(process.env.MINIVERSE_STALE_MS ?? 10 * 60 * 1000);
+const DEFAULT_STALE_MS = 10 * 60 * 1000;
+const configuredStaleMs = Number(process.env.MINIVERSE_STALE_MS);
+const STALE_MS = Number.isFinite(configuredStaleMs) && configuredStaleMs > 0
+  ? configuredStaleMs
+  : DEFAULT_STALE_MS;
 
 /** 最近一次心跳：status.json 优先，回退 input.json（worker 启动后尚未上报时） */
 function lastHeartbeatMs(taskId: string): number | null {

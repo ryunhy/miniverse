@@ -27,9 +27,11 @@ vi.mock("./worker-spawn", () => ({
   workerBusy: () => ({ busy: false, pid: null }),
   releaseWorkerLock: () => {},
   releaseWorkerLockIfIdle: () => {},
+  spawnReconstructionWorker: () => ({ ok: false, error: "已有重建任务在运行" }),
 }));
 
 const { syncTaskFromWorker } = await import("./status-sync");
+const { POST: retryReconstruction } = await import("@/app/api/reconstructions/[id]/retry/route");
 
 function makeTask(id: string, row: { id: string; status: string; photo_count: number; worker_pid?: number }) {
   store.create(row.id, {}, row.photo_count);
@@ -91,6 +93,21 @@ describe("status-sync：派发记录丢失时首次同步落终态（卡 #700127
     const row = store.get(id)!;
     expect(row.status).toBe("failed");
     expect(row.error).toBe("worker 异常退出");
+  });
+
+  it("失败任务重试但 worker 忙时，旧的 failed 上报不会把新一轮排队变回失败", async () => {
+    const id = "t-retry-queued";
+    const d = makeTask(id, { id, status: "failed", photo_count: 3, worker_pid: 999999 });
+    writeFileSync(path.join(d, "status.json"), JSON.stringify({ status: "failed", error: "上次失败" }));
+
+    const response = await retryReconstruction(new Request("http://localhost", { method: "POST" }), {
+      params: Promise.resolve({ id }),
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).workerStarted).toBe(false);
+    syncTaskFromWorker(id);
+
+    expect(store.get(id)).toMatchObject({ status: "pending", attempts: 1, worker_pid: null, error: null });
   });
 
   it("row=completed 是终态：不再被 status.json 覆盖", () => {
