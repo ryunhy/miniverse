@@ -60,3 +60,6 @@ Thumbs.db
 *.db
 *.db-wal
 *.db-shm
+
+# Python 测试缓存（0-3 基线钉点时补齐）
+.pytest_cache/

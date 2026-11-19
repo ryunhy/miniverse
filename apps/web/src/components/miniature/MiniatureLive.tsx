@@ -87,6 +87,26 @@ export default function MiniatureLive({
 
       {err && <div className="rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-200">{err}</div>}
 
+      {view.failure && (
+        <div className="space-y-2 rounded-lg border border-rose-900 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
+          {view.failure.unknownReason && (
+            <p className="text-slate-300">worker 原始信息：{view.failure.unknownReason}</p>
+          )}
+          {view.failure.codes.map((c) => (
+            <p key={c.code}>
+              <span className="mr-1 font-mono text-rose-300">{c.code}</span>
+              {c.recover}
+              <span className="ml-1 text-slate-400">（{c.retryableAsIs ? "可原样重试" : "原样重试不会成功"}）</span>
+            </p>
+          ))}
+          <p className="text-slate-300">
+            {view.failure.retryableAsIs
+              ? "可以先直接重试一次；若仍然失败，再按上面的解除条件处理。"
+              : "按上面的解除条件处理好输入后重新上传；直接点重试大概率还是同样失败。"}
+          </p>
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[1fr_1.4fr]">
         <div>
           <StageTimeline stages={view.stages} />
