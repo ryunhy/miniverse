@@ -11,10 +11,15 @@ workspaces/ 下的一次性脚本：
 - 缓存按「输入 + 参数 + 代码指纹」失效：任一变化都会让下游阶段重跑，不做静默复用。
 - 失败不掩盖：任一阶段失败都如实返回 partial/failed，已完成的产物路径保留，
   Worker 据此保留原 3DGS 交付，不把微缩失败报成成功。
+
+缓存为多槽（T-700011）：每个「键」一个槽位，槽内快照阶段 JSON 与其引用的产物
+（GLB / trace.npz）。换参数不再覆盖旧参数的缓存，切回来直接恢复快照复用；
+槽位超上限按最近使用淘汰并记日志；旧单槽目录平滑迁移或明确报不兼容，不静默丢数据。
 """
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 import traceback
@@ -134,28 +139,173 @@ def probe_env(scene_dir: Path | None = None) -> dict:
 
 
 def _cache_path(cache_dir: Path, stage: str) -> Path:
+    """旧单槽布局的文件名（仅用于迁移识别，新写入不再使用）。"""
     return cache_dir / f"{stage}.json"
 
 
+# ---------------------------------------------------------------------------
+# 多槽缓存（T-700011）
+#
+# 布局：cache/<stage>/<key前16位>/
+#   record.json   键、状态、产物路径与哈希、artifacts 快照清单、created/last_used
+#   output.json   阶段 JSON 的快照（out_dir 里的原件可能被别的参数跑覆盖）
+#   artifacts/*   阶段 JSON 引用的产物快照（GLB、trace.npz）
+#
+# 命中时把快照恢复回原路径再走既有完整性复核；恢复失败按未命中处理并记日志。
+# 淘汰按 last_used_at 最旧优先，逐条记日志，不静默丢数据。
+# ---------------------------------------------------------------------------
+SLOT_KEY_LEN = 16
+MAX_SLOTS_PER_STAGE = 4
+
+
+def _slot_dir(cache_dir: Path, stage: str, key: str) -> Path:
+    return cache_dir / stage / key[:SLOT_KEY_LEN]
+
+
+def _doc_artifacts(doc: dict, base: Path) -> list[Path]:
+    """阶段 JSON 引用、需要随槽快照的文件。base 用于解析相对路径（trace.npz）。"""
+    paths: list[Path] = []
+    glb = (doc.get("scene_glb") or {}).get("path")
+    if glb:
+        paths.append(Path(glb))
+    for inst in doc.get("instances") or []:
+        g = inst.get("glb")
+        if g:
+            paths.append(Path(g))
+        tr = (inst.get("traces") or {}).get("npz")
+        if tr:
+            paths.append(base / tr)
+    shell = (doc.get("room_shell") or {}).get("glb")
+    if shell:
+        paths.append(Path(shell))
+    return [p for p in paths if p.is_file()]
+
+
+def _slot_used_at(rec: dict) -> str:
+    return rec.get("last_used_at") or rec.get("created_at") or ""
+
+
+def _evict_slots(cache_dir: Path, stage: str, keep: str, log) -> None:
+    stage_dir = cache_dir / stage
+    if not stage_dir.is_dir():
+        return
+    slots = [d for d in stage_dir.iterdir() if d.is_dir() and (d / "record.json").exists()]
+    overflow = len(slots) - MAX_SLOTS_PER_STAGE
+    if overflow <= 0:
+        return
+    recs = []
+    for d in slots:
+        try:
+            recs.append((d, _load_json(d / "record.json")))
+        except Exception:  # noqa: BLE001 - 坏记录视为最旧，优先淘汰
+            recs.append((d, {}))
+    recs.sort(key=lambda dr: _slot_used_at(dr[1]))
+    for d, rec in recs:
+        if overflow <= 0:
+            break
+        if d.name == keep[:SLOT_KEY_LEN]:
+            continue  # 刚写入的槽永不淘汰
+        _log(log, "缓存淘汰：stage=%s slot=%s key=%s… last_used=%s（超上限 %d 槽）",
+             stage, d.name, (rec.get("cache_key") or "?")[:12], _slot_used_at(rec) or "?",
+             MAX_SLOTS_PER_STAGE)
+        shutil.rmtree(d)
+        overflow -= 1
+
+
+def _migrate_legacy_slot(cache_dir: Path, stage: str, log) -> None:
+    """旧单槽 cache/<stage>.json → 多槽。幂等：迁移后原文件改名 .migrated 留审计。
+
+    产物仍完整 → 平滑迁移成可用槽；产物已被旧设计覆盖 → 明确记日志报不兼容，
+    记录保留在 .migrated 文件里，不静默丢数据。
+    """
+    legacy = _cache_path(cache_dir, stage)
+    if not legacy.exists():
+        return
+    try:
+        rec = _load_json(legacy)
+    except Exception as e:  # noqa: BLE001
+        _log(log, "旧单槽缓存 %s 损坏无法迁移，原文件保留为 .migrated：%s", stage, e)
+        legacy.rename(legacy.with_suffix(".json.migrated"))
+        return
+    if not isinstance(rec, dict) or "cache_key" not in rec or "output" not in rec:
+        # 该位置可能是别的文件（如测试把产物写在 cache 目录里），不是缓存记录就不动它
+        _log(log, "旧单槽位置 %s 不含缓存记录字段，保留原文件不迁移", stage)
+        return
+    key = rec.get("cache_key") or ""
+    out_path = Path(rec.get("output") or "")
+    intact = bool(key) and out_path.is_file() and C.sha256_file(out_path) == rec.get("output_sha256")
+    if intact:
+        slot = _slot_dir(cache_dir, stage, key)
+        if not (slot / "record.json").exists():
+            (slot / "artifacts").mkdir(parents=True, exist_ok=True)
+            doc = _load_json(out_path)
+            arts = []
+            for i, p in enumerate(_doc_artifacts(doc, out_path.parent)):
+                rel = f"artifacts/{i}{p.suffix}"
+                shutil.copyfile(p, slot / rel)
+                arts.append({"path": str(p), "slot_rel": rel,
+                             "sha256": C.sha256_file(p), "bytes": p.stat().st_size})
+            shutil.copyfile(out_path, slot / "output.json")
+            rec["artifacts"] = arts
+            rec.setdefault("last_used_at", rec.get("created_at") or _now())
+            C.write_json(slot / "record.json", rec)
+            _log(log, "旧单槽缓存 %s 平滑迁移为多槽（key=%s…）", stage, key[:12])
+    else:
+        _log(log, "旧单槽缓存 %s（key=%s…）引用的产物已被单槽设计覆盖，无法恢复："
+             "报不兼容，记录保留为 .migrated，按未命中重跑", stage, (key or "?")[:12])
+    legacy.rename(legacy.with_suffix(".json.migrated"))
+
+
 def _read_cache(cache_dir: Path, stage: str, key: str, log) -> dict | None:
-    path = _cache_path(cache_dir, stage)
-    if not path.exists():
+    _migrate_legacy_slot(cache_dir, stage, log)
+    slot = _slot_dir(cache_dir, stage, key)
+    rec_path = slot / "record.json"
+    if not rec_path.exists():
         return None
     try:
-        rec = _load_json(path)
+        rec = _load_json(rec_path)
     except Exception as e:  # noqa: BLE001 - 缓存损坏按未命中处理
         _log(log, "缓存 %s 读取失败，忽略：%s", stage, e)
         return None
     if rec.get("cache_key") != key:
         _log(log, "缓存 %s 命中但键已变化（输入/参数/代码），重跑", stage)
         return None
+    # 恢复快照：out_dir 里的原件与引用产物可能已被另一组参数的运行覆盖
+    out_path = Path(rec["output"])
+    try:
+        if not out_path.is_file() or C.sha256_file(out_path) != rec.get("output_sha256"):
+            shutil.copyfile(slot / "output.json", out_path)
+        for a in rec.get("artifacts") or []:
+            p = Path(a["path"])
+            if not p.is_file() or p.stat().st_size != a["bytes"] or C.sha256_file(p) != a["sha256"]:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(slot / a["slot_rel"], p)
+    except Exception as e:  # noqa: BLE001 - 恢复失败按未命中，不拿坏产物冒充复用
+        _log(log, "缓存 %s 快照恢复失败，按未命中处理：%s", stage, e)
+        return None
+    if not out_path.is_file() or C.sha256_file(out_path) != rec.get("output_sha256"):
+        _log(log, "缓存 %s 快照与记录哈希不符，按未命中处理", stage)
+        return None
+    if not _doc_intact(_load_json(out_path)):
+        _log(log, "缓存 %s 引用产物不完整，按未命中处理", stage)
+        return None
+    rec["last_used_at"] = _now()
+    C.write_json(rec_path, rec)
     return rec
 
 
 def _write_cache(cache_dir: Path, stage: str, key: str, doc: dict, doc_path: Path,
-                 seconds: float) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    C.write_json(_cache_path(cache_dir, stage), {
+                 seconds: float, log=None) -> None:
+    slot = _slot_dir(cache_dir, stage, key)
+    (slot / "artifacts").mkdir(parents=True, exist_ok=True)
+    arts = []
+    for i, p in enumerate(_doc_artifacts(doc, doc_path.parent)):
+        rel = f"artifacts/{i}{p.suffix}"
+        shutil.copyfile(p, slot / rel)
+        arts.append({"path": str(p), "slot_rel": rel,
+                     "sha256": C.sha256_file(p), "bytes": p.stat().st_size})
+    shutil.copyfile(doc_path, slot / "output.json")
+    C.write_json(slot / "record.json", {
         "stage": stage,
         "cache_key": key,
         "status": doc.get("status"),
@@ -163,7 +313,10 @@ def _write_cache(cache_dir: Path, stage: str, key: str, doc: dict, doc_path: Pat
         "output_sha256": C.sha256_file(doc_path),
         "seconds": round(seconds, 3),
         "created_at": _now(),
+        "last_used_at": _now(),
+        "artifacts": arts,
     })
+    _evict_slots(cache_dir, stage, keep=key, log=log)
 
 
 def _doc_intact(doc: dict) -> bool:
@@ -303,7 +456,7 @@ def run_miniature(
 
             structure = infer_structure(scene)
             C.write_json(st_path, structure)
-            _write_cache(cache_dir, "structure", cache_key_, structure, st_path, time.time() - t0)
+            _write_cache(cache_dir, "structure", cache_key_, structure, st_path, time.time() - t0, log)
             stages.append(_stage_result("structure", structure.get("status"), time.time() - t0, st_path))
             diags.extend(structure.get("diagnostics") or [])
             _log(log, "structure：status=%s 用时=%.1fs", structure.get("status"), time.time() - t0)
@@ -346,7 +499,7 @@ def run_miniature(
                 nerf_transform=load_nerf_transform(scene),
             )
             C.write_json(ins_path, instances)
-            _write_cache(cache_dir, "instances", cache_key_, instances, ins_path, time.time() - t0)
+            _write_cache(cache_dir, "instances", cache_key_, instances, ins_path, time.time() - t0, log)
             stages.append(_stage_result("instances", instances.get("status"), time.time() - t0, ins_path))
             diags.extend(instances.get("diagnostics") or [])
             _log(log, "instances：status=%s n=%s 用时=%.1fs", instances.get("status"),
@@ -381,7 +534,7 @@ def run_miniature(
             geometry = build_geometry(scene, structure, instances, out_dir=out,
                                       export_glb=True, alpha_factor=p["alpha_factor"])
             C.write_json(geo_path, geometry)
-            _write_cache(cache_dir, "geometry", cache_key_, geometry, geo_path, time.time() - t0)
+            _write_cache(cache_dir, "geometry", cache_key_, geometry, geo_path, time.time() - t0, log)
             stages.append(_stage_result("geometry", geometry.get("status"), time.time() - t0, geo_path))
             diags.extend(geometry.get("diagnostics") or [])
             _log(log, "geometry：status=%s 有面=%s/%s 用时=%.1fs", geometry.get("status"),
@@ -416,7 +569,7 @@ def run_miniature(
             texture = build_texture(scene, structure, instances, out_dir=out,
                                     tex_size=p["tex_size"], export_glb=True)
             C.write_json(tex_path, texture)
-            _write_cache(cache_dir, "texture", cache_key_, texture, tex_path, time.time() - t0)
+            _write_cache(cache_dir, "texture", cache_key_, texture, tex_path, time.time() - t0, log)
             stages.append(_stage_result("texture", texture.get("status"), time.time() - t0, tex_path))
             diags.extend(texture.get("diagnostics") or [])
             _log(log, "texture：status=%s glb=%s 用时=%.1fs", texture.get("status"),

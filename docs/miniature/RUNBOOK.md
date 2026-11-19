@@ -72,15 +72,27 @@ data/reconstructions/<id>/miniature/  # 微缩产物（六阶段 json + glb/）
 
 ## 4. 缓存
 
-缓存目录：`data/reconstructions/<id>/miniature/cache/`，每阶段一条 JSON。
-键 = `sha256(manifest_id + params + code_fingerprint)`：
+缓存目录：`data/reconstructions/<id>/miniature/cache/`，**多槽**（T-700011）：
+每阶段一个目录 `cache/<stage>/`，其下每个键一个槽位 `<key前16位>/`，槽内含
+`record.json`（键/状态/产物路径与哈希/artifacts 清单/created/last_used）、
+`output.json`（阶段 JSON 快照）与 `artifacts/*`（GLB、trace.npz 快照）。
+键 = `sha256(manifest_id + params + code_fingerprint + PIPELINE_VERSION)`：
 
 - `manifest_id`：`miniature.input.v1` 的内容哈希（含场景路径与照片/COLMAP 指纹）
 - `params`：上表四个可调参数
 - `code_fingerprint`：`app/miniature/*.py` 逐文件 sha 汇总
+- `PIPELINE_VERSION`：管线版本常量
 
-**已知限制**：缓存是单槽的——换参数会把旧参数的缓存覆盖，切回来必须重算。
-需要同时保留两套参数产物时，指定不同的 `--data-dir`（或不同 task）。
+命中时先把槽内快照恢复回 `out_dir` 原路径（原件可能已被另一组参数的运行覆盖），
+再走既有 sha / `_doc_intact` 完整性复核；恢复失败按未命中重跑并记日志，不拿坏产物冒充复用。
+
+- **换参数切回直接复用**：A→B→A 时 A 的四阶段命中缓存（`reused=[structure,instances,geometry,texture]`），
+  不再重算。合成场景实测冷跑 5.3 s → 切回 0.19 s（约 28×，`docs/evidence/cache-slots/switchback_timing.json`，
+  输入为合成、四阶段算法与缓存编排为生产代码；真实场景参考值 46.9 s→2.7 s 见第 5 节）。
+- **槽位上限与淘汰**：每阶段最多 `MAX_SLOTS_PER_STAGE=4` 槽，超出按 `last_used_at` 最旧优先淘汰，
+  逐条记日志（`缓存淘汰：stage=… slot=… last_used=…`），刚写入的槽永不淘汰。
+- **旧单槽迁移**：旧 `cache/<stage>.json` 自动迁移——产物完整则平滑迁成可用槽；
+  产物已被旧设计覆盖则明确记日志报不兼容、记录保留为 `.json.migrated` 审计、按未命中重跑，不静默丢数据。
 
 ## 5. 验收证据索引（T-700072）
 
@@ -104,4 +116,5 @@ Worker 端到端 GLB：3867708 B、sha `b82c0eac…`（沙箱任务）。**字�
   因此 `result.synthetic=true`（有推断像素就必须标，不能让推断冒充实拍）。
 - **GPU 锁不适用**：微缩全 CPU，代码中零处引用 `gpu.lock`；`resources/` 下当前也没有该文件
   （只有 `.gitkeep` 与 `archive/`），所以"GPU 锁行为"这一项对本链路只能证明"不发生干扰"，不能证明"正确抢锁"。
-- **单槽缓存**：见第 4 节。
+- **缓存槽位有上限**：每阶段最多 4 槽（T-700011 多槽），超出按最近使用淘汰并记日志。
+  需同时保留 4 套以上参数产物时，仍指定不同的 `--data-dir`（或不同 task）。见第 4 节。

@@ -1,0 +1,53 @@
+{
+  "task": "T-700012",
+  "verified_at": "2026-11-19",
+  "server": "next start -p 3002（生产构建，含另一会话未提交的写操作鉴权 proxy）",
+  "scene": "demo 模板新建，sceneId=57f046d8-43a5-4903-a0e2-e139d7192bd5，7 件家具",
+  "auth_note": "客户端 api.ts 未接 Authorization，另一会话鉴权 fail-closed 致浏览器写操作 401；实测以本地 dev token 重启服务并在浏览器 fetch 注入 Bearer（仅运行时 harness，未改源码）。",
+  "acceptance": {
+    "1_previews_no_placeholder": {
+      "result": "pass",
+      "evidence": "npm run tools:glb 生成 14 张预览（apps/web/public/assets/furniture/previews/，本目录已副本）；live 编辑器素材库 tab 7 张家具预览 img 全部 complete=true、naturalWidth=128；document.body.innerText 不含「占位」(hasZhanwei=false)；null-glbPath 徽章文案为「无 GLB」。"
+    },
+    "2_preview_size_and_in_tree": {
+      "result": "pass",
+      "evidence": "14 张预览总字节 12.8KB（<1MB）；文件已入工作树 apps/web/public/assets/furniture/previews/ 与 assets/furniture/previews/（尚未 git commit，用户未要求提交）。"
+    },
+    "3_unknown_asset_fallback": {
+      "result": "pass",
+      "evidence": "Furniture.tsx 零改动（git status 空）；LeftPanel img onError 隐藏破图、保留 Box 图标兜底；未知 assetId 仍走 Furniture.tsx 占位立方体。"
+    },
+    "4_catalog_unchanged_convention_paths": {
+      "result": "pass",
+      "evidence": "asset-catalog.ts 零改动（git status 空）；预览路径按 assetId 约定派生 /assets/furniture/previews/<assetId>.png。"
+    },
+    "5_stagetimeline_real_state": {
+      "result": "pass",
+      "evidence": "StageTimeline.tsx 状态仅来自任务产物/worker 报告，无百分比、无基于时间的假进度；detail/evidence 直显，缺省回退阶段说明 hint。"
+    },
+    "6_whitelist_unchanged": {
+      "result": "pass",
+      "evidence": "asset-catalog.ts 白名单零改动。"
+    },
+    "7_npm_four_piece": {
+      "result": "pass",
+      "evidence": "npm test 18 文件/173 用例过；typecheck/lint 干净；build 退出码 0（先前已跑）。"
+    },
+    "8_editor_interactions_no_regression": {
+      "functional_result": "pass",
+      "functional_evidence": {
+        "add_then_undo": "添加沙发：家具 7→8、撤销按钮启用；点撤销(Ctrl+Z)：8→7、撤销禁用、重做启用。",
+        "select": "点场景树「椅子」行：属性面板显示 椅子/chair/用户添加/位置(XYZ)/旋转/缩放/颜色，状态栏「家具 7 件 · 已选 1」，移动控件启用。",
+        "move_then_undo": "改 X 位置输入 1.4→2.0：store 更新、撤销启用；点撤销：X 复原 1.4、计数仍 7。"
+      },
+      "screenshot_result": "pass",
+      "screenshot_files": [
+        "editor_selected.png（选中椅子+移动 gizmo，状态栏已选1）",
+        "leftpanel_previews.png（素材库真实家具缩略图+GLB徽章，无「占位」）",
+        "editor_moved.png（X 1.4→2.0 椅子右移，已保存吐司）",
+        "editor_undo.png（撤销后椅子回原位，与选中态一致）"
+      ],
+      "screenshot_note": "用户打开应用内浏览器面板后 MCP take_screenshot 存盘成功。editor_undo 首截曾带既有版本冲突弹窗（CAS 409，编辑器原有功能、非回归），选「先不处理」后重截干净画面；右上残留自动保存暂停横幅属冲突后续指示，不影响交互判定。"
+    }
+  }
+}

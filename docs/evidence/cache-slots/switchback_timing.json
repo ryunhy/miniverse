@@ -1,0 +1,159 @@
+{
+  "task": "T-700011",
+  "synthetic": true,
+  "synthetic_note": "本机无真实场景数据/无 WSL，参考值 46.9s→2.7s 不可复现；输入为程序生成合成房间，四阶段算法与缓存编排均为生产代码（未打桩）。",
+  "scene_points": 20100,
+  "max_slots_per_stage": 4,
+  "slot_key_len": 16,
+  "runs": {
+    "A_cold_512": {
+      "tex_size": 512,
+      "wall_seconds": 5.67,
+      "reported_seconds": 5.65,
+      "status": "ok",
+      "reused": [],
+      "cache_key": "06e09a3a65872c1f4bb5d2bb35a841fd5465bcf1ae5c829ee387a5e5ab8b5146",
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "ok",
+          "seconds": 0.161,
+          "cached": false
+        },
+        {
+          "name": "structure",
+          "status": "ok",
+          "seconds": 0.169,
+          "cached": false
+        },
+        {
+          "name": "instances",
+          "status": "ok",
+          "seconds": 1.051,
+          "cached": false
+        },
+        {
+          "name": "geometry",
+          "status": "ok",
+          "seconds": 2.882,
+          "cached": false
+        },
+        {
+          "name": "texture",
+          "status": "ok",
+          "seconds": 1.39,
+          "cached": false
+        }
+      ],
+      "scene_glb_bytes": 94852,
+      "scene_glb_sha256": "4e31fb7d645cc47bc079a9db3d9e06d40b3ecb2a5e02ad290da90af794d93863",
+      "error": null
+    },
+    "B_cold_256": {
+      "tex_size": 256,
+      "wall_seconds": 1.555,
+      "reported_seconds": 1.54,
+      "status": "ok",
+      "reused": [],
+      "cache_key": "c947f4e4ccae3bd767c440bed03016f3327cc6fa95c05ecb12649b035c7cd870",
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "ok",
+          "seconds": 0.09,
+          "cached": false
+        },
+        {
+          "name": "structure",
+          "status": "ok",
+          "seconds": 0.205,
+          "cached": false
+        },
+        {
+          "name": "instances",
+          "status": "ok",
+          "seconds": 0.09,
+          "cached": false
+        },
+        {
+          "name": "geometry",
+          "status": "ok",
+          "seconds": 0.152,
+          "cached": false
+        },
+        {
+          "name": "texture",
+          "status": "ok",
+          "seconds": 1.0,
+          "cached": false
+        }
+      ],
+      "scene_glb_bytes": 63896,
+      "scene_glb_sha256": "314f5a12ebd39c8b0f6f7cfdf874d527ec9a55c95a2ac88a63ef02da9706cf03",
+      "error": null
+    },
+    "A_warm_512": {
+      "tex_size": 512,
+      "wall_seconds": 0.215,
+      "reported_seconds": 0.2,
+      "status": "ok",
+      "reused": [
+        "structure",
+        "instances",
+        "geometry",
+        "texture"
+      ],
+      "cache_key": "06e09a3a65872c1f4bb5d2bb35a841fd5465bcf1ae5c829ee387a5e5ab8b5146",
+      "stages": [
+        {
+          "name": "ingest",
+          "status": "ok",
+          "seconds": 0.079,
+          "cached": false
+        },
+        {
+          "name": "structure",
+          "status": "ok",
+          "seconds": 0.156,
+          "cached": true
+        },
+        {
+          "name": "instances",
+          "status": "ok",
+          "seconds": 1.039,
+          "cached": true
+        },
+        {
+          "name": "geometry",
+          "status": "ok",
+          "seconds": 2.856,
+          "cached": true
+        },
+        {
+          "name": "texture",
+          "status": "ok",
+          "seconds": 1.347,
+          "cached": true
+        }
+      ],
+      "scene_glb_bytes": 94852,
+      "scene_glb_sha256": "4e31fb7d645cc47bc079a9db3d9e06d40b3ecb2a5e02ad290da90af794d93863",
+      "error": null
+    }
+  },
+  "assertions": {
+    "warm_A_reused_all_four_stages": true,
+    "warm_A_reused": [
+      "structure",
+      "instances",
+      "geometry",
+      "texture"
+    ],
+    "A_cold_wall_seconds": 5.67,
+    "A_warm_wall_seconds": 0.215,
+    "speedup_cold_over_warm": 26.37,
+    "warm_faster_than_cold": true,
+    "A_cold_and_warm_glb_identical": true,
+    "B_key_differs_from_A": true
+  }
+}
