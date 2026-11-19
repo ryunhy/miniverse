@@ -13,7 +13,9 @@ export type TaskStatus = "pending" | "processing" | "completed" | "failed" | "ca
 
 export const STATUS_FLOW: Record<TaskStatus, TaskStatus[]> = {
   // pending → completed 允许：直跑 worker（不经 worker-loop 轮询）的快速任务无中间态上报
-  pending: ["processing", "canceled", "completed"],
+  // pending → failed 允许（卡 #700127）：worker 已把 failed 写进 status.json 但派发记录
+  // 丢失（进程在首次同步前死亡/重试竞态）时，懒同步必须能落到 failed，否则任务永远 pending
+  pending: ["processing", "canceled", "completed", "failed"],
   processing: ["completed", "failed", "canceled"],
   completed: [],
   failed: ["pending", "canceled"],
@@ -132,14 +134,16 @@ export class TaskStore {
   }
 
   /** 失败/取消后重试：回到 pending 并累加尝试次数（上限 3） */
-  retry(id: string): TaskRow {
+  retry(id: string, clearPreviousReport?: () => void): TaskRow {
     const row = this.get(id);
     if (!row) throw new Error(`任务不存在: ${id}`);
     if (row.status !== "failed" && row.status !== "canceled") {
       throw new Error(`仅失败/已取消任务可重试，当前: ${row.status}`);
     }
     if (row.attempts >= 3) throw new Error("重试次数已达上限（3）");
-    return this.transition(id, "pending", { error: null, attemptIncrement: true });
+    // 必须在回到 pending 前清理上一轮上报，即使本轮暂时无法派发。
+    clearPreviousReport?.();
+    return this.transition(id, "pending", { error: null, workerPid: null, attemptIncrement: true });
   }
 
   setWorkerPid(id: string, pid: number | null): void {

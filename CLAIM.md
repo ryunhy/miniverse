@@ -42,6 +42,7 @@
 
 | 2026-11-19 | zcode | `chore/baseline-20261119`（PR：工作树基线点） | `.gitignore`（根构建配置，必须登记）、`NEXT-STEPS.md` | 已释放 | MemoryOS 卡 #700118 已 task_done（基线点 1e4f50c，回滚演练通过）；.gitignore 仅新增 `.pytest_cache/` 排除规则 |
 | 2026-11-19 | zcode | `feature/miniature-publish`（PR：worker 自动发布 + 微缩失败归因） | `services/reconstruction/app/worker.py`、`apps/web/src/lib/miniature/{failure.ts,failure.test.ts,stages.ts}`、`apps/web/src/components/miniature/MiniatureLive.tsx` | 已释放 | MemoryOS 卡 #700121/#700122/#700123 已 task_done 验收关闭；PR 合入后分区释放 |
+| 2026-11-19 | zcode | `fix/task-status-finalize`（PR：任务状态收敛） | `apps/web/src/lib/server/{status-sync.ts,status-sync.test.ts(新增)}`；**`apps/web/src/lib/server/task-store.ts`（全局禁改区）** | 已释放 | MemoryOS 卡 #700127 已 task_done；task-store.ts 改动理由：STATUS_FLOW.pending 缺 `failed`，导致 worker 在首次同步前失败的任务永久卡 pending，需补白名单一行；影响面仅状态机白名单，不改任何契约字段 |
 > 规则：开工前在你那一行写清「谁 / 分支 / 路径 / 状态 / 何时释放」。收工后改成 `已释放`，不要直接删行（保留审计）。
 
 ## 三、登记规则
