@@ -1,0 +1,321 @@
+diff --git a/apps/web/src/app/api/reconstructions/[id]/miniature/route.ts b/apps/web/src/app/api/reconstructions/[id]/miniature/route.ts
+index e67bf98..f3cb980 100644
+--- a/apps/web/src/app/api/reconstructions/[id]/miniature/route.ts
++++ b/apps/web/src/app/api/reconstructions/[id]/miniature/route.ts
+@@ -3,7 +3,14 @@ import { NextResponse } from "next/server";
+ import { getTaskStore } from "@/lib/server/task-store";
+ import { syncTaskFromWorker } from "@/lib/server/status-sync";
+ import { sceneAssetPath, SceneValidationError } from "@/lib/server/recon-editable-scene";
+-import { deriveMiniatureView, syntheticFixture } from "@/lib/miniature/stages";
++import {
++  applyAssetCheck,
++  classifyAssetFailure,
++  deriveMiniatureView,
++  syntheticFixture,
++  ASSET_CHECK_STATUS,
++  type AssetCheck,
++} from "@/lib/miniature/stages";
+ 
+ type Ctx = { params: Promise<{ id: string }> };
+ 
+@@ -12,7 +19,8 @@ type Ctx = { params: Promise<{ id: string }> };
+  *
+  * - 真实任务：阶段状态来自 result 里 worker 上报的 stages，没有就退化成"仅任务状态"，
+  *   绝不按时间补进度。
+- * - 产物核对：清单说导出成功还不够，这里再 stat 一次 GLB；文件不在就判失败。
++ * - 产物核对：清单说导出成功还不够，这里再核对一次磁盘；未发布(404)/资产缺失(409)/清单非法(422)
++ *   三态分开表达，各自文案与 HTTP 语义不同，失败响应体仍携带完整 view。
+  * - `?fixture=1`：显式 synthetic 的 UI 契约示例，只用于前端状态演示（响应里 synthetic=true）。
+  */
+ export async function GET(req: Request, ctx: Ctx) {
+@@ -36,21 +44,33 @@ export async function GET(req: Request, ctx: Ctx) {
+   let view = deriveMiniatureView(task);
+ 
+   if (view.ready) {
++    // 产物核对三态分开表达（T-700018）：未发布 / 资产缺失 / 清单非法，
++    // 不再一律报「磁盘上找不到该文件」。失败响应仍带完整 view，HTTP 码见 ASSET_CHECK_STATUS。
++    let check: AssetCheck;
+     try {
+-      const st = fs.statSync(sceneAssetPath(id, "room"));
+-      view = { ...view, glb: view.glb ? { ...view.glb, bytes: st.size } : view.glb };
++      const file = sceneAssetPath(id, "room");
++      check = { kind: "ok", bytes: fs.statSync(file).size };
+     } catch (e) {
+-      if (!(e instanceof SceneValidationError) && (e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+-      // 清单里有 GLB 但文件不见了：必须显式失败，不能沿用"生成成功"
+-      view = {
+-        ...view,
+-        ready: false,
+-        glb: null,
+-        banner: { level: "error", text: "结果清单声明了 GLB，但磁盘上找不到该文件，不能视为生成成功。" },
+-        stages: view.stages.map((s) =>
+-          s.key === "export" ? { ...s, state: "failed", detail: "GLB 文件缺失" } : s
+-        ),
+-      };
++      if (e instanceof SceneValidationError) {
++        check = classifyAssetFailure(e.message);
++      } else if ((e as NodeJS.ErrnoException).code === "ENOENT") {
++        // sceneAssetPath 通过后文件才被移走：清单在、文件缺
++        check = { kind: "asset_missing", detail: "GLB 文件在核对间隙被移除（ENOENT）" };
++      } else {
++        throw e;
++      }
++    }
++    view = applyAssetCheck(view, check);
++    if (check.kind !== "ok") {
++      return NextResponse.json(
++        {
++          view,
++          error: view.banner.text,
++          events: store.events(id, 30),
++          logTail: store.logTail(id, 60),
++        },
++        { status: ASSET_CHECK_STATUS[check.kind] },
++      );
+     }
+   }
+ 
+diff --git a/apps/web/src/lib/miniature/stages.test.ts b/apps/web/src/lib/miniature/stages.test.ts
+index a532b65..340cc40 100644
+--- a/apps/web/src/lib/miniature/stages.test.ts
++++ b/apps/web/src/lib/miniature/stages.test.ts
+@@ -1,6 +1,14 @@
+ import assert from "node:assert/strict";
+ import { test } from "vitest";
+-import { deriveMiniatureView, syntheticFixture, type TaskLike } from "./stages";
++import {
++  applyAssetCheck,
++  classifyAssetFailure,
++  deriveMiniatureView,
++  syntheticFixture,
++  ASSET_CHECK_STATUS,
++  type MiniatureView,
++  type TaskLike,
++} from "./stages";
+ 
+ function task(over: Partial<TaskLike>): TaskLike {
+   return { id: "t1", status: "processing", photo_count: 8, result: null, error: null, ...over };
+@@ -94,3 +102,129 @@ test("fixture 误用为真实数据时 synthetic=false 透传（防止冒充）"
+   );
+   assert.equal(v.synthetic, false);
+ });
++
++// ---------------------------------------------------------------------------
++// T-700018：产物核对三态（未发布 / 资产缺失 / 清单非法）
++// ---------------------------------------------------------------------------
++
++/** 一个 ready=true 的已完成视图，作为三态改写的输入。 */
++function readyView(): MiniatureView {
++  return deriveMiniatureView(
++    task({
++      status: "completed",
++      result: resultWith({ path: "glb/a.glb", bytes: 42 }, {
++        stages: {
++          ingest: { state: "done" },
++          structure: { state: "done" },
++          instances: { state: "done" },
++          geometry: { state: "done" },
++          texture: { state: "done" },
++          export: { state: "done" },
++        },
++      }),
++    })
++  );
++}
++
++test("错误消息归类：没有 scene.json → 未发布（禁改区消息契约回归）", () => {
++  const c = classifyAssetFailure("场景不存在: abc-123");
++  assert.equal(c.kind, "unpublished");
++});
++
++test("错误消息归类：清单在但文件缺 → 资产缺失", () => {
++  const c = classifyAssetFailure("资产文件不存在: room.glb");
++  assert.equal(c.kind, "asset_missing");
++  if (c.kind === "asset_missing") assert.match(c.detail, /room\.glb/);
++});
++
++test("错误消息归类：schema/解析/路径问题 → 清单非法", () => {
++  for (const msg of [
++    "scene.json 无法解析: Unexpected token",
++    "不支持的场景 schema: miniverse.scene-manifest.v0",
++    "scene.json 缺少 objects",
++    "资产路径非法: ../evil.glb",
++    "资产路径越界: room.glb",
++    "非法场景 ID",
++  ]) {
++    assert.equal(classifyAssetFailure(msg).kind, "manifest_invalid", msg);
++  }
++});
++
++test("三态 HTTP 语义互不相同：404 / 409 / 422", () => {
++  assert.equal(ASSET_CHECK_STATUS.unpublished, 404);
++  assert.equal(ASSET_CHECK_STATUS.asset_missing, 409);
++  assert.equal(ASSET_CHECK_STATUS.manifest_invalid, 422);
++  assert.equal(new Set(Object.values(ASSET_CHECK_STATUS)).size, 3);
++});
++
++test("未发布：ready=false、warn、文案说「尚未发布」而不是「找不到文件」", () => {
++  const v = applyAssetCheck(readyView(), { kind: "unpublished" });
++  assert.equal(v.ready, false);
++  assert.equal(v.glb, null);
++  assert.equal(v.banner.level, "warn");
++  assert.match(v.banner.text, /尚未发布/);
++  assert.match(v.banner.text, /scene\.json/);
++  assert.doesNotMatch(v.banner.text, /磁盘上找不到该文件/);
++  assert.equal(v.stages.find((s) => s.key === "export")?.state, "failed");
++});
++
++test("资产缺失：ready=false、error、文案说「资产文件缺失」并带明细", () => {
++  const v = applyAssetCheck(readyView(), { kind: "asset_missing", detail: "资产文件不存在: room.glb" });
++  assert.equal(v.ready, false);
++  assert.equal(v.glb, null);
++  assert.equal(v.banner.level, "error");
++  assert.match(v.banner.text, /资产文件缺失/);
++  assert.match(v.banner.text, /room\.glb/);
++  assert.equal(v.stages.find((s) => s.key === "export")?.state, "failed");
++});
++
++test("清单非法：ready=false、error、文案说「非法」而不是「找不到文件」", () => {
++  const v = applyAssetCheck(readyView(), { kind: "manifest_invalid", detail: "资产路径非法: ../evil.glb" });
++  assert.equal(v.ready, false);
++  assert.equal(v.glb, null);
++  assert.equal(v.banner.level, "error");
++  assert.match(v.banner.text, /非法/);
++  assert.match(v.banner.text, /\.\.\/evil\.glb/);
++  assert.doesNotMatch(v.banner.text, /磁盘上找不到该文件/);
++  assert.equal(v.stages.find((s) => s.key === "export")?.state, "failed");
++});
++
++test("三态文案互不相同，且都不把 ready 强置 true", () => {
++  const base = readyView();
++  const texts = [
++    applyAssetCheck(base, { kind: "unpublished" }),
++    applyAssetCheck(base, { kind: "asset_missing", detail: "资产文件不存在: room.glb" }),
++    applyAssetCheck(base, { kind: "manifest_invalid", detail: "不支持的场景 schema: x" }),
++  ];
++  assert.equal(new Set(texts.map((v) => v.banner.text)).size, 3);
++  for (const v of texts) assert.equal(v.ready, false);
++});
++
++test("核对成功：只更新字节数，ready 与其余字段不变", () => {
++  const base = readyView();
++  const v = applyAssetCheck(base, { kind: "ok", bytes: 2048 });
++  assert.equal(v.ready, true);
++  assert.equal(v.glb?.bytes, 2048);
++  assert.equal(v.banner.level, "ok");
++  assert.deepEqual(v.stages.map((s) => s.state), base.stages.map((s) => s.state));
++});
++
++test("消费契约回归：三态失败视图仍完整可渲染（六阶段齐全、身份字段保留）", () => {
++  const base = readyView();
++  for (const check of [
++    { kind: "unpublished" },
++    { kind: "asset_missing", detail: "资产文件不存在: room.glb" },
++    { kind: "manifest_invalid", detail: "scene.json 无法解析: bad" },
++  ] as const) {
++    const v = applyAssetCheck(base, check);
++    assert.equal(v.taskId, base.taskId);
++    assert.equal(v.status, base.status);
++    assert.equal(v.stages.length, 6);
++    assert.ok(v.banner.text.length > 0);
++    assert.equal(typeof v.ready, "boolean");
++    // 非导出阶段不被核对结果篡改
++    for (const s of v.stages.filter((s) => s.key !== "export")) {
++      assert.deepEqual(s, base.stages.find((b) => b.key === s.key));
++    }
++  }
++});
+diff --git a/apps/web/src/lib/miniature/stages.ts b/apps/web/src/lib/miniature/stages.ts
+index 821fbeb..1c7a4d5 100644
+--- a/apps/web/src/lib/miniature/stages.ts
++++ b/apps/web/src/lib/miniature/stages.ts
+@@ -185,6 +185,85 @@ export function deriveMiniatureView(task: TaskLike): MiniatureView {
+   };
+ }
+ 
++/**
++ * 产物核对结果（T-700018）：route 负责 IO 与错误归类，这里只做纯视图改写，方便单测。
++ * 三种失败态必须分开表达，不许一律说「磁盘上找不到该文件」：
++ * - unpublished：磁盘上没有 scene.json，场景尚未发布（任务可能已生成成功）；
++ * - asset_missing：清单已发布，但清单声明的 GLB 资产文件不在磁盘上；
++ * - manifest_invalid：清单 schema 或资产路径非法，清单本身不可消费。
++ */
++export type AssetCheck =
++  | { kind: "ok"; bytes: number }
++  | { kind: "unpublished" }
++  | { kind: "asset_missing"; detail: string }
++  | { kind: "manifest_invalid"; detail: string };
++
++/**
++ * 三态各自的 HTTP 语义（互不相同）：
++ * - 404：场景资源尚未发布，不存在；
++ * - 409：清单声明与磁盘实际状态冲突（声明了资产但文件缺失）；
++ * - 422：清单内容非法，服务端无法处理消费。
++ * 成功核对为 200。失败响应体仍携带完整 view（消费契约：body.view 始终可渲染）。
++ */
++export const ASSET_CHECK_STATUS = {
++  unpublished: 404,
++  asset_missing: 409,
++  manifest_invalid: 422,
++} as const;
++
++/**
++ * 把 recon-editable-scene 的 SceneValidationError 消息归入三态。
++ * 该模块属全局禁改区，这里把它的消息契约钉死并配回归测试：
++ * - 「场景不存在: …」→ 没有 scene.json，未发布；
++ * - 「资产文件不存在: …」→ 清单在、资产文件缺；
++ * - 其余（无法解析 / schema 不支持 / 缺 objects / 路径非法 / 越界 / 非法 ID）→ 清单或路径非法。
++ */
++export function classifyAssetFailure(message: string): AssetCheck {
++  if (message.startsWith("场景不存在")) return { kind: "unpublished" };
++  if (message.startsWith("资产文件不存在")) return { kind: "asset_missing", detail: message };
++  return { kind: "manifest_invalid", detail: message };
++}
++
++/**
++ * 按核对结果改写视图。失败态一律 ready=false、glb=null、export 阶段显式 failed；
++ * 绝不为了让页面看起来成功而把 ready 置 true。
++ */
++export function applyAssetCheck(view: MiniatureView, check: AssetCheck): MiniatureView {
++  if (check.kind === "ok") {
++    return { ...view, glb: view.glb ? { ...view.glb, bytes: check.bytes } : view.glb };
++  }
++
++  let banner: MiniatureView["banner"];
++  let exportDetail: string;
++  if (check.kind === "unpublished") {
++    banner = {
++      level: "warn",
++      text: "任务已完成，但场景尚未发布：磁盘上没有 scene.json 清单。发布完成前无法预览或下载，这不等于生成失败。",
++    };
++    exportDetail = "场景尚未发布（缺少 scene.json）";
++  } else if (check.kind === "asset_missing") {
++    banner = {
++      level: "error",
++      text: `场景清单已发布，但清单声明的 GLB 资产文件缺失（${check.detail}），不能视为生成成功。`,
++    };
++    exportDetail = `清单声明的资产文件缺失：${check.detail}`;
++  } else {
++    banner = {
++      level: "error",
++      text: `场景清单无法消费：${check.detail}。清单 schema 或资产路径非法，需修复清单后重新发布。`,
++    };
++    exportDetail = `清单 schema 或资产路径非法：${check.detail}`;
++  }
++
++  return {
++    ...view,
++    ready: false,
++    glb: null,
++    banner,
++    stages: view.stages.map((s) => (s.key === "export" ? { ...s, state: "failed", detail: exportDetail } : s)),
++  };
++}
++
+ /** UI 契约 fixture：显式 synthetic，只用于前端状态演示，不能当真实生成证据。 */
+ export function syntheticFixture(overrides: Partial<TaskLike> = {}): TaskLike {
+   return {
+ .../api/reconstructions/[id]/miniature/route.ts    |  50 +++++---
+ apps/web/src/lib/miniature/stages.test.ts          | 136 ++++++++++++++++++++-
+ apps/web/src/lib/miniature/stages.ts               |  79 ++++++++++++
+ 3 files changed, 249 insertions(+), 16 deletions(-)

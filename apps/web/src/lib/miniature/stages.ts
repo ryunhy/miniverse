@@ -185,6 +185,85 @@ export function deriveMiniatureView(task: TaskLike): MiniatureView {
   };
 }
 
+/**
+ * 产物核对结果（T-700018）：route 负责 IO 与错误归类，这里只做纯视图改写，方便单测。
+ * 三种失败态必须分开表达，不许一律说「磁盘上找不到该文件」：
+ * - unpublished：磁盘上没有 scene.json，场景尚未发布（任务可能已生成成功）；
+ * - asset_missing：清单已发布，但清单声明的 GLB 资产文件不在磁盘上；
+ * - manifest_invalid：清单 schema 或资产路径非法，清单本身不可消费。
+ */
+export type AssetCheck =
+  | { kind: "ok"; bytes: number }
+  | { kind: "unpublished" }
+  | { kind: "asset_missing"; detail: string }
+  | { kind: "manifest_invalid"; detail: string };
+
+/**
+ * 三态各自的 HTTP 语义（互不相同）：
+ * - 404：场景资源尚未发布，不存在；
+ * - 409：清单声明与磁盘实际状态冲突（声明了资产但文件缺失）；
+ * - 422：清单内容非法，服务端无法处理消费。
+ * 成功核对为 200。失败响应体仍携带完整 view（消费契约：body.view 始终可渲染）。
+ */
+export const ASSET_CHECK_STATUS = {
+  unpublished: 404,
+  asset_missing: 409,
+  manifest_invalid: 422,
+} as const;
+
+/**
+ * 把 recon-editable-scene 的 SceneValidationError 消息归入三态。
+ * 该模块属全局禁改区，这里把它的消息契约钉死并配回归测试：
+ * - 「场景不存在: …」→ 没有 scene.json，未发布；
+ * - 「资产文件不存在: …」→ 清单在、资产文件缺；
+ * - 其余（无法解析 / schema 不支持 / 缺 objects / 路径非法 / 越界 / 非法 ID）→ 清单或路径非法。
+ */
+export function classifyAssetFailure(message: string): AssetCheck {
+  if (message.startsWith("场景不存在")) return { kind: "unpublished" };
+  if (message.startsWith("资产文件不存在")) return { kind: "asset_missing", detail: message };
+  return { kind: "manifest_invalid", detail: message };
+}
+
+/**
+ * 按核对结果改写视图。失败态一律 ready=false、glb=null、export 阶段显式 failed；
+ * 绝不为了让页面看起来成功而把 ready 置 true。
+ */
+export function applyAssetCheck(view: MiniatureView, check: AssetCheck): MiniatureView {
+  if (check.kind === "ok") {
+    return { ...view, glb: view.glb ? { ...view.glb, bytes: check.bytes } : view.glb };
+  }
+
+  let banner: MiniatureView["banner"];
+  let exportDetail: string;
+  if (check.kind === "unpublished") {
+    banner = {
+      level: "warn",
+      text: "任务已完成，但场景尚未发布：磁盘上没有 scene.json 清单。发布完成前无法预览或下载，这不等于生成失败。",
+    };
+    exportDetail = "场景尚未发布（缺少 scene.json）";
+  } else if (check.kind === "asset_missing") {
+    banner = {
+      level: "error",
+      text: `场景清单已发布，但清单声明的 GLB 资产文件缺失（${check.detail}），不能视为生成成功。`,
+    };
+    exportDetail = `清单声明的资产文件缺失：${check.detail}`;
+  } else {
+    banner = {
+      level: "error",
+      text: `场景清单无法消费：${check.detail}。清单 schema 或资产路径非法，需修复清单后重新发布。`,
+    };
+    exportDetail = `清单 schema 或资产路径非法：${check.detail}`;
+  }
+
+  return {
+    ...view,
+    ready: false,
+    glb: null,
+    banner,
+    stages: view.stages.map((s) => (s.key === "export" ? { ...s, state: "failed", detail: exportDetail } : s)),
+  };
+}
+
 /** UI 契约 fixture：显式 synthetic，只用于前端状态演示，不能当真实生成证据。 */
 export function syntheticFixture(overrides: Partial<TaskLike> = {}): TaskLike {
   return {
